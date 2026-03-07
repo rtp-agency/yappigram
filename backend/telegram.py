@@ -482,18 +482,25 @@ async def startup_listeners() -> None:
         result = await db.execute(select(TgAccount).where(TgAccount.is_active.is_(True)))
         accounts = result.scalars().all()
 
+    print(f"[STARTUP] Found {len(accounts)} active TG accounts")
     for account in accounts:
         try:
+            print(f"[STARTUP] Connecting {account.phone} (session: {account.session_file})")
             client = TelegramClient(
                 account.session_file,
                 settings.TG_API_ID,
                 settings.TG_API_HASH,
             )
             await client.connect()
-            if await client.is_user_authorized():
+            authorized = await client.is_user_authorized()
+            print(f"[STARTUP] {account.phone} authorized={authorized}")
+            if authorized:
                 await _start_listener(account, client)
+                print(f"[STARTUP] Listener started for {account.phone}")
+            else:
+                print(f"[STARTUP] {account.phone} NOT authorized, skipping")
         except Exception as e:
-            print(f"Failed to reconnect {account.phone}: {e}")
+            print(f"[STARTUP] Failed to reconnect {account.phone}: {e}")
 
 
 async def shutdown_listeners() -> None:
