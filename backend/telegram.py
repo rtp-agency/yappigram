@@ -157,37 +157,53 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
             if not contact:
                 is_new_contact = True
-                count_result = await db.execute(select(func.count(Contact.id)))
-                seq = count_result.scalar() + 1
 
                 if is_group:
                     group_title = getattr(chat, "title", None) or ""
-                    contact = Contact(
-                        tg_account_id=account.id,
-                        real_tg_id=peer_tg_id,
-                        real_name_encrypted=encrypt(group_title),
-                        real_username_encrypted=encrypt(getattr(chat, "username", None) or ""),
-                        group_title_encrypted=encrypt(group_title),
-                        alias=generate_alias(group_title, seq),
-                        chat_type=chat_type,
-                        status="pending",
-                    )
                 else:
                     sender = await event.get_sender()
                     first_name = getattr(sender, "first_name", "") or ""
                     username = getattr(sender, "username", None)
-                    contact = Contact(
-                        tg_account_id=account.id,
-                        real_tg_id=peer_tg_id,
-                        real_name_encrypted=encrypt(first_name),
-                        real_username_encrypted=encrypt(username) if username else None,
-                        alias=generate_alias(first_name, seq),
-                        chat_type="private",
-                        status="pending",
-                    )
-                db.add(contact)
-                await db.commit()
-                await db.refresh(contact)
+
+                # Retry alias generation on collision
+                for _attempt in range(5):
+                    count_result = await db.execute(select(func.count(Contact.id)))
+                    seq = count_result.scalar() + 1 + _attempt
+
+                    if is_group:
+                        contact = Contact(
+                            tg_account_id=account.id,
+                            real_tg_id=peer_tg_id,
+                            real_name_encrypted=encrypt(group_title),
+                            real_username_encrypted=encrypt(getattr(chat, "username", None) or ""),
+                            group_title_encrypted=encrypt(group_title),
+                            alias=generate_alias(group_title, seq),
+                            chat_type=chat_type,
+                            status="pending",
+                        )
+                    else:
+                        contact = Contact(
+                            tg_account_id=account.id,
+                            real_tg_id=peer_tg_id,
+                            real_name_encrypted=encrypt(first_name),
+                            real_username_encrypted=encrypt(username) if username else None,
+                            alias=generate_alias(first_name, seq),
+                            chat_type="private",
+                            status="pending",
+                        )
+                    db.add(contact)
+                    try:
+                        await db.commit()
+                        await db.refresh(contact)
+                        break
+                    except Exception as e:
+                        await db.rollback()
+                        contact = None
+                        if "unique" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                else:
+                    print(f"[WARN] Failed to create contact after 5 attempts for {peer_tg_id}")
+                    return
 
             elif contact.status == "blocked":
                 return

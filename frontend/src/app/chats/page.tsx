@@ -68,11 +68,15 @@ function ChatsContent() {
   const [unread, setUnread] = useState<Set<string>>(new Set());
   const [notification, setNotification] = useState<{ alias: string; text: string } | null>(null);
 
+  // Pinned chats (per-user)
+  const [pinned, setPinned] = useState<Set<string>>(new Set());
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<Contact | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => { api("/api/pinned").then((ids: string[]) => setPinned(new Set(ids))).catch(console.error); }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { api("/api/tags").then(setAllTags).catch(console.error); }, []);
 
@@ -269,9 +273,26 @@ function ChatsContent() {
     } catch (e: any) { alert(e.message); }
   };
 
-  const filteredContacts = contacts.filter((c) =>
-    c.alias.toLowerCase().includes(search.toLowerCase())
-  );
+  const togglePin = async (contactId: string) => {
+    const isPinned = pinned.has(contactId);
+    try {
+      await api(`/api/pinned/${contactId}`, { method: isPinned ? "DELETE" : "POST" });
+      setPinned((prev) => {
+        const next = new Set(prev);
+        isPinned ? next.delete(contactId) : next.add(contactId);
+        return next;
+      });
+    } catch (e: any) { console.error(e); }
+  };
+
+  const filteredContacts = contacts
+    .filter((c) => c.alias.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      const ap = pinned.has(a.id) ? 1 : 0;
+      const bp = pinned.has(b.id) ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      return (b.last_message_at || "").localeCompare(a.last_message_at || "");
+    });
 
   const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel";
 
@@ -344,6 +365,15 @@ function ChatsContent() {
                       {new Date(c.last_message_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
                   )}
+                  <button
+                      onClick={(e) => { e.stopPropagation(); togglePin(c.id); }}
+                      className={`transition-colors p-1 ${pinned.has(c.id) ? "text-brand" : "text-slate-600 hover:text-brand"}`}
+                      title={pinned.has(c.id) ? "Unpin" : "Pin"}
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={pinned.has(c.id) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 17v5" /><path d="M9 2h6l-1 7h4l-7 8 1-5H8l1-10z" />
+                      </svg>
+                    </button>
                   {isAdmin && (
                     <button
                       onClick={(e) => { e.stopPropagation(); deleteContact(c.id); }}

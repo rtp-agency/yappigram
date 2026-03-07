@@ -25,7 +25,7 @@ from auth import (
 from bot import get_bot_username, start_bot_polling, stop_bot
 from config import settings
 from crypto import decrypt
-from models import AuditLog, Base, BotInvite, Contact, Message, Staff, StaffTgAccount, Tag, TgAccount, engine
+from models import AuditLog, Base, BotInvite, Contact, Message, PinnedChat, Staff, StaffTgAccount, Tag, TgAccount, engine
 from schemas import (
     BotInviteCreate,
     BotInviteOut,
@@ -308,6 +308,36 @@ async def delete_contact(contact_id: UUID, user: AdminUser, db: DB):
         "contact_id": str(contact_id),
     })
     return
+
+
+# ---- Pinned chats (per-user) ----
+
+@app.get("/api/pinned")
+async def get_pinned(user: Annotated[Staff, Depends(get_current_user)], db: DB):
+    result = await db.execute(
+        select(PinnedChat.contact_id).where(PinnedChat.staff_id == user.id)
+    )
+    return [str(row[0]) for row in result.all()]
+
+
+@app.post("/api/pinned/{contact_id}", status_code=204)
+async def pin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
+    existing = await db.execute(
+        select(PinnedChat).where(PinnedChat.staff_id == user.id, PinnedChat.contact_id == contact_id)
+    )
+    if existing.scalar_one_or_none():
+        return
+    db.add(PinnedChat(staff_id=user.id, contact_id=contact_id))
+    await db.commit()
+
+
+@app.delete("/api/pinned/{contact_id}", status_code=204)
+async def unpin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
+    from sqlalchemy import delete as sa_delete
+    await db.execute(
+        sa_delete(PinnedChat).where(PinnedChat.staff_id == user.id, PinnedChat.contact_id == contact_id)
+    )
+    await db.commit()
 
 
 @app.get("/api/contacts/{contact_id}/reveal", response_model=ContactReveal)

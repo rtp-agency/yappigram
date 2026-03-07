@@ -152,6 +152,16 @@ class StaffTgAccount(Base):
     assigned_at = Column(DateTime, default=func.now())
 
 
+class PinnedChat(Base):
+    """Per-user pinned chats."""
+    __tablename__ = "pinned_chats"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    staff_id = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=False)
+    contact_id = Column(UUID(as_uuid=True), ForeignKey("contacts.id"), nullable=False)
+    pinned_at = Column(DateTime, default=func.now())
+
+
 class AuditLog(Base):
     """Logs sensitive actions like revealing real client data."""
     __tablename__ = "audit_log"
