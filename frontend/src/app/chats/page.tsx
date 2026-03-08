@@ -666,15 +666,23 @@ function ChatsContent() {
                             {m.media_type === "voice" && (
                               <audio src={mediaUrl(m.media_path)} controls className="w-full" />
                             )}
-                            {m.media_type === "document" && (
-                              <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-brand-light hover:underline">
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                                  <polyline points="14 2 14 8 20 8" />
-                                </svg>
-                                Download file
-                              </a>
-                            )}
+                            {m.media_type === "document" && (() => {
+                              const ext = m.media_path!.split('.').pop()?.toLowerCase() || '';
+                              const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext);
+                              return isImage ? (
+                                <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer">
+                                  <img src={mediaUrl(m.media_path)} alt="" className="rounded-xl max-w-full max-h-64 object-cover" />
+                                </a>
+                              ) : (
+                                <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-brand-light hover:underline">
+                                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                                    <polyline points="14 2 14 8 20 8" />
+                                  </svg>
+                                  {m.media_path!.split('/').pop() || 'Download file'}
+                                </a>
+                              );
+                            })()}
                           </div>
                         )}
 

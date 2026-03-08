@@ -276,8 +276,12 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             if media_type and ext is not None:
                 filename = f"{contact.id}_{msg_obj.id}{ext}"
                 filepath = os.path.join(MEDIA_DIR, filename)
-                await msg_obj.download_media(file=filepath)
-                media_path = filename
+                actual_path = await msg_obj.download_media(file=filepath)
+                if actual_path:
+                    # Telethon may append extension for documents
+                    media_path = os.path.basename(actual_path)
+                else:
+                    media_path = filename
 
             # --- SAVE MESSAGE ---
             sanitized_content = sanitize_text(msg_obj.text)
