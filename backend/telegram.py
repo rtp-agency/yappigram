@@ -36,7 +36,9 @@ def _session_path(phone: str) -> str:
 def generate_alias(real_name: str | None, sequence: int) -> str:
     if not real_name or not real_name.strip():
         return f"Us-{sequence:03d}"
-    prefix = real_name.strip()[:2]
+    # Strip HTML-unsafe and problematic chars from prefix
+    clean = re.sub(r'[<>&"\'\\/@#]', '', real_name.strip())
+    prefix = clean[:2] if clean else "Us"
     return f"{prefix}-{sequence:03d}"
 
 

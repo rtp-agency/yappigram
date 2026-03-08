@@ -83,23 +83,24 @@ async def notify_new_contact(
     if not settings.TG_BOT_TOKEN or not settings.TG_ADMIN_CHAT_ID:
         return
 
+    alias = _esc(contact.alias)
     if chat_type in ("group", "channel"):
         type_label = "Новая группа" if chat_type == "group" else "Новый канал"
         text = (
             f"📥 <b>{type_label}</b>\n\n"
-            f"Псевдоним: <b>{contact.alias}</b>\n"
-            f"Название: {real_name or '—'}\n"
+            f"Псевдоним: <b>{alias}</b>\n"
+            f"Название: {_esc(real_name or '—')}\n"
             f"ID: <code>{contact.real_tg_id}</code>"
         )
     else:
-        username_line = f"Username: @{username}\n" if username else ""
+        username_line = f"Username: @{_esc(username)}\n" if username else ""
         text = (
             f"📥 <b>Новый клиент</b>\n\n"
-            f"Псевдоним: <b>{contact.alias}</b>\n"
-            f"Имя: {real_name or '—'}\n"
+            f"Псевдоним: <b>{alias}</b>\n"
+            f"Имя: {_esc(real_name or '—')}\n"
             f"{username_line}"
             f"ID: <code>{contact.real_tg_id}</code>\n"
-            f"Сообщение: <i>«{first_message or '—'}»</i>"
+            f"Сообщение: <i>«{_esc(first_message or '—')}»</i>"
         )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -331,7 +332,7 @@ async def cmd_pending(message: TgMessage):
         ])
         chat_icon = "👥" if contact.chat_type in ("group", "channel") else "👤"
         await message.answer(
-            f"⏳ {chat_icon} <b>{contact.alias}</b>\n"
+            f"⏳ {chat_icon} <b>{_esc(contact.alias)}</b>\n"
             f"Создан: {contact.created_at.strftime('%d.%m %H:%M') if contact.created_at else '—'}",
             parse_mode="HTML",
             reply_markup=keyboard,
@@ -431,7 +432,7 @@ async def on_approve(callback: CallbackQuery):
     await callback.answer("✅ Одобрен")
     try:
         await callback.message.edit_text(
-            callback.message.text + "\n\n✅ <b>ОДОБРЕН</b>",
+            _esc(callback.message.text) + "\n\n✅ <b>ОДОБРЕН</b>",
             parse_mode="HTML",
         )
     except Exception:
@@ -458,7 +459,7 @@ async def on_block(callback: CallbackQuery):
     await callback.answer("❌ Заблокирован")
     try:
         await callback.message.edit_text(
-            callback.message.text + "\n\n❌ <b>ЗАБЛОКИРОВАН</b>",
+            _esc(callback.message.text) + "\n\n❌ <b>ЗАБЛОКИРОВАН</b>",
             parse_mode="HTML",
         )
     except Exception:
