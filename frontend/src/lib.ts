@@ -203,6 +203,7 @@ export interface Contact {
   alias: string;
   status: string;
   chat_type: string;
+  is_forum: boolean;
   tags: string[];
   notes: string | null;
   assigned_to: string | null;
@@ -228,6 +229,8 @@ export interface Message {
   forwarded_from_alias: string | null;
   sender_alias: string | null;
   inline_buttons: string | null;
+  topic_id: number | null;
+  topic_name: string | null;
   created_at: string;
 }
 

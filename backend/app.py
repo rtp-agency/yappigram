@@ -289,7 +289,7 @@ async def block_contact(contact_id: UUID, user: AdminUser, db: DB):
 
 
 @app.delete("/api/contacts/{contact_id}", status_code=204)
-async def delete_contact(contact_id: UUID, user: AdminUser, db: DB):
+async def delete_contact(contact_id: UUID, user: CurrentUser, db: DB):
     """Delete a contact and its messages from CRM (does not affect Telegram)."""
     result = await db.execute(select(Contact).where(Contact.id == contact_id))
     contact = result.scalar_one_or_none()

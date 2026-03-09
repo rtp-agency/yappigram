@@ -302,7 +302,7 @@ function ChatsContent() {
       return (b.last_message_at || "").localeCompare(a.last_message_at || "");
     });
 
-  const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel";
+  const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel" || selected?.chat_type === "supergroup";
 
   return (
     <div className="flex h-full">
@@ -354,7 +354,7 @@ function ChatsContent() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
                   {/* Group/channel icon */}
-                  {(c.chat_type === "group" || c.chat_type === "channel") && (
+                  {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") && (
                     <svg className="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
                       <circle cx="9" cy="7" r="4" />
@@ -605,6 +605,15 @@ function ChatsContent() {
                       className={`max-w-[75%] min-w-0 ${m.direction === "outgoing" ? "ml-auto" : ""}`}
                       onDoubleClick={() => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }}
                     >
+                      {/* Topic badge for forum supergroups */}
+                      {m.topic_id && m.topic_id !== 1 && (
+                        <div className="text-[10px] text-purple-400 font-medium mb-0.5 ml-1 flex items-center gap-1">
+                          <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                          </svg>
+                          {m.topic_name || `Topic #${m.topic_id}`}
+                        </div>
+                      )}
                       {/* Sender alias for group messages */}
                       {m.direction === "incoming" && isGroup && m.sender_alias && (
                         <div className="text-xs text-accent font-medium mb-0.5 ml-1">{m.sender_alias}</div>
@@ -833,7 +842,7 @@ function ChatsContent() {
                   onClick={() => doForward(c.id)}
                   className="w-full text-left px-4 py-3 hover:bg-surface-hover transition-colors border-b border-surface-border/50 flex items-center gap-2"
                 >
-                  {(c.chat_type === "group" || c.chat_type === "channel") && (
+                  {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") && (
                     <svg className="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
                       <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />

@@ -141,7 +141,24 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
         is_group = event.is_group or event.is_channel
         peer_tg_id = event.chat_id
-        chat_type = "group" if event.is_group else ("channel" if event.is_channel else "private")
+        is_forum = getattr(chat, "forum", False)
+        if is_forum or (is_group and getattr(chat, "megagroup", False)):
+            chat_type = "supergroup"
+        elif event.is_group:
+            chat_type = "group"
+        elif event.is_channel:
+            chat_type = "channel"
+        else:
+            chat_type = "private"
+
+        # Extract topic info for forum supergroups
+        topic_id = None
+        topic_name = None
+        if is_forum and msg_obj.reply_to and hasattr(msg_obj.reply_to, "forum_topic") and msg_obj.reply_to.forum_topic:
+            topic_id = getattr(msg_obj.reply_to, "reply_to_msg_id", None)
+        elif is_forum:
+            # General topic (id=1)
+            topic_id = 1
 
         async with async_session() as db:
             # --- CONTACT LOOKUP / CREATION ---
@@ -181,6 +198,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                             group_title_encrypted=encrypt(group_title),
                             alias=generate_alias(group_title, seq),
                             chat_type=chat_type,
+                            is_forum=is_forum,
                             status="pending",
                         )
                     else:
@@ -299,6 +317,8 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 sender_tg_id=sender_tg_id_val,
                 sender_alias=sender_alias_val,
                 inline_buttons=inline_buttons_json,
+                topic_id=topic_id,
+                topic_name=topic_name,
             )
             db.add(msg)
             contact.last_message_at = func.now()
@@ -347,6 +367,8 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                         "reply_to_content_preview": msg.reply_to_content_preview,
                         "forwarded_from_alias": msg.forwarded_from_alias,
                         "sender_alias": msg.sender_alias,
+                        "topic_id": msg.topic_id,
+                        "topic_name": msg.topic_name,
                         "inline_buttons": msg.inline_buttons,
                         "is_deleted": False,
                         "created_at": str(msg.created_at),

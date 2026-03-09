@@ -64,7 +64,8 @@ class Contact(Base):
     real_username_encrypted = Column(Text)
 
     group_title_encrypted = Column(Text, nullable=True)
-    chat_type = Column(String, nullable=False, default="private")  # private | group | channel
+    chat_type = Column(String, nullable=False, default="private")  # private | group | channel | supergroup
+    is_forum = Column(Boolean, default=False)  # Supergroup with topics
 
     # Public data
     alias = Column(String, nullable=False, unique=True)
@@ -110,6 +111,10 @@ class Message(Base):
     # Group sender
     sender_tg_id = Column(BigInteger, nullable=True)
     sender_alias = Column(String, nullable=True)
+
+    # Forum topic
+    topic_id = Column(Integer, nullable=True)
+    topic_name = Column(String, nullable=True)
 
     # Bot inline buttons (JSON string)
     inline_buttons = Column(Text, nullable=True)

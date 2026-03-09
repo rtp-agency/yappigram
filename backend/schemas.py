@@ -55,6 +55,7 @@ class ContactOut(BaseModel):
     alias: str
     status: str
     chat_type: str = "private"
+    is_forum: bool = False
     tags: list[str]
     notes: str | None
     assigned_to: UUID | None
@@ -100,6 +101,8 @@ class MessageOut(BaseModel):
     forwarded_from_alias: str | None = None
     sender_alias: str | None = None
     inline_buttons: str | None = None
+    topic_id: int | None = None
+    topic_name: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
