@@ -77,6 +77,11 @@ function ChatsContent() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { api("/api/pinned").then((ids: string[]) => setPinned(new Set(ids))).catch(console.error); }, []);
+  useEffect(() => {
+    api("/api/unread").then((data: Record<string, number>) => {
+      setUnread(new Set(Object.keys(data)));
+    }).catch(console.error);
+  }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { api("/api/tags").then(setAllTags).catch(console.error); }, []);
 
@@ -99,6 +104,8 @@ function ChatsContent() {
             if (prev.some((m) => m.id === event.message.id)) return prev;
             return [...prev, event.message];
           });
+          // Mark as read immediately since user is viewing this chat
+          api(`/api/messages/${event.contact_id}/read`, { method: "PATCH" }).catch(console.error);
         } else {
           // Mark as unread + show notification
           setUnread((prev) => new Set(prev).add(event.contact_id));
@@ -140,8 +147,9 @@ function ChatsContent() {
     setReplyTo(null);
     setForwardMode(false);
     setForwardSelected(new Set());
-    // Clear unread for this chat
+    // Clear unread for this chat — persist to DB
     setUnread((prev) => { const n = new Set(prev); n.delete(selected.id); return n; });
+    api(`/api/messages/${selected.id}/read`, { method: "PATCH" }).catch(console.error);
   }, [selected]);
 
   useEffect(() => {

@@ -296,9 +296,9 @@ async def delete_contact(contact_id: UUID, user: AdminUser, db: DB):
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
-    # Delete messages first (FK constraint)
-    await db.execute(select(Message).where(Message.contact_id == contact_id))
+    # Delete related records first (FK constraints)
     from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(PinnedChat).where(PinnedChat.contact_id == contact_id))
     await db.execute(sa_delete(Message).where(Message.contact_id == contact_id))
     await db.delete(contact)
     await db.commit()
@@ -559,15 +559,37 @@ async def send_media(
     return msg
 
 
-@app.patch("/api/messages/{message_id}/read")
-async def mark_read(message_id: UUID, user: CurrentUser, db: DB):
-    result = await db.execute(select(Message).where(Message.id == message_id))
-    msg = result.scalar_one_or_none()
-    if not msg:
-        raise HTTPException(status.HTTP_404_NOT_FOUND)
-    msg.is_read = True
+@app.patch("/api/messages/{contact_id}/read")
+async def mark_read(contact_id: UUID, user: CurrentUser, db: DB):
+    """Mark all unread incoming messages in a contact chat as read."""
+    from sqlalchemy import update
+    await db.execute(
+        update(Message)
+        .where(Message.contact_id == contact_id, Message.direction == "incoming", Message.is_read.is_(False))
+        .values(is_read=True)
+    )
     await db.commit()
     return {"status": "ok"}
+
+
+@app.get("/api/unread")
+async def get_unread_counts(user: CurrentUser, db: DB):
+    """Get unread message counts per contact for approved contacts."""
+    from sqlalchemy import case
+    result = await db.execute(
+        select(
+            Message.contact_id,
+            func.count(Message.id).label("count"),
+        )
+        .join(Contact, Contact.id == Message.contact_id)
+        .where(
+            Message.direction == "incoming",
+            Message.is_read.is_(False),
+            Contact.status == "approved",
+        )
+        .group_by(Message.contact_id)
+    )
+    return {str(row.contact_id): row.count for row in result.all()}
 
 
 @app.post("/api/messages/{contact_id}/forward")

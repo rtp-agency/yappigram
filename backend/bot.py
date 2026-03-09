@@ -187,7 +187,11 @@ async def notify_new_message(
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Открыть CRM", url=settings.WEBAPP_URL or "https://t.me")],
+        [InlineKeyboardButton(
+            text="📱 Открыть CRM",
+            web_app=WebAppInfo(url=settings.WEBAPP_URL) if settings.WEBAPP_URL else None,
+            url=None if settings.WEBAPP_URL else "https://t.me",
+        )],
     ])
 
     try:
