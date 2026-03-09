@@ -298,6 +298,7 @@ async def delete_contact(contact_id: UUID, user: CurrentUser, db: DB):
 
     # Delete related records first (FK constraints)
     from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(AuditLog).where(AuditLog.target_contact_id == contact_id))
     await db.execute(sa_delete(PinnedChat).where(PinnedChat.contact_id == contact_id))
     await db.execute(sa_delete(Message).where(Message.contact_id == contact_id))
     await db.delete(contact)
