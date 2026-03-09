@@ -584,7 +584,7 @@ function ChatsContent() {
             )}
 
             {/* Messages */}
-            <div className="flex-1 overflow-auto p-4 space-y-2">
+            <div className="flex-1 overflow-auto overflow-x-hidden p-4 space-y-2">
               {messages.map((m) => {
                 const buttons = parseInlineButtons(m.inline_buttons);
                 return (
@@ -602,7 +602,7 @@ function ChatsContent() {
                     )}
 
                     <div
-                      className={`max-w-[75%] ${m.direction === "outgoing" ? "ml-auto" : ""}`}
+                      className={`max-w-[75%] min-w-0 ${m.direction === "outgoing" ? "ml-auto" : ""}`}
                       onDoubleClick={() => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }}
                     >
                       {/* Sender alias for group messages */}
@@ -695,12 +695,24 @@ function ChatsContent() {
                         )}
 
                         {/* Content */}
-                        {m.content && <span className={`break-words whitespace-pre-wrap ${m.is_deleted ? "line-through" : ""}`}>{m.content}</span>}
+                        {m.content && <span className={`break-words whitespace-pre-wrap [overflow-wrap:anywhere] ${m.is_deleted ? "line-through" : ""}`}>{m.content}</span>}
 
-                        {/* Timestamp + edited */}
-                        <div className={`text-[10px] mt-1 ${m.direction === "outgoing" ? "text-white/40" : "text-slate-500"}`}>
+                        {/* Timestamp + edited + read status */}
+                        <div className={`flex items-center justify-end gap-1 text-[10px] mt-1 ${m.direction === "outgoing" ? "text-white/40" : "text-slate-500"}`}>
                           {m.is_edited && <span className="italic mr-1">edited</span>}
                           {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          {m.direction === "outgoing" && (
+                            <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              {m.is_read ? (
+                                <>
+                                  <polyline points="1 12 5 16 12 6" />
+                                  <polyline points="8 12 12 16 20 6" />
+                                </>
+                              ) : (
+                                <polyline points="4 12 9 17 20 6" />
+                              )}
+                            </svg>
+                          )}
                         </div>
 
                         {/* Inline bot buttons */}
