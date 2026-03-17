@@ -176,9 +176,22 @@ function ChatsContent() {
     return () => clearInterval(interval);
   }, [selected]);
 
+  const justOpenedChat = useRef(false);
+
+  // When selecting a new chat, flag so first message load scrolls to bottom
+  useEffect(() => {
+    if (selected) justOpenedChat.current = true;
+  }, [selected]);
+
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+    // Always scroll to bottom when chat first opens
+    if (justOpenedChat.current) {
+      justOpenedChat.current = false;
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+      return;
+    }
     // Auto-scroll only if user is near the bottom (within 150px)
     const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
     if (isNearBottom) {
@@ -193,9 +206,11 @@ function ChatsContent() {
     return () => clearTimeout(t);
   }, [botToast]);
 
+  const sendingRef = useRef(false);
   const sendMessage = async () => {
     const content = text.trim();
-    if (!content || !selected) return;
+    if (!content || !selected || sendingRef.current) return;
+    sendingRef.current = true;
     // Clear input immediately for snappy UX
     setText("");
     setReplyTo(null);
@@ -208,8 +223,11 @@ function ChatsContent() {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setMessages((prev) => [...prev, msg]);
-    } catch (e: any) { alert(e.message); }
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
+    } catch (e: any) { alert(e.message); } finally { sendingRef.current = false; }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
