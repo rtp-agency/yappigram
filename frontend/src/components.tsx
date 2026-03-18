@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { clearTokens, disconnectWS, getTokens, isTelegramWebApp, getTgWebApp } from "./lib";
+import { api, clearTokens, disconnectWS, getTokens, isTelegramWebApp, getTgWebApp } from "./lib";
 
 // ============================================================
 // SVG Icons
@@ -91,11 +91,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [isTg, setIsTg] = useState(false);
+  const [isOrgTeam, setIsOrgTeam] = useState(false);
+
+  // Fetch current user to check if they're in an organization (not personal workspace)
+  useEffect(() => {
+    const tokens = getTokens();
+    if (!tokens) return;
+    api("/api/staff/me")
+      .then((data: any) => {
+        if (data?.postforge_org_id && !data.postforge_org_id.startsWith("personal_")) {
+          setIsOrgTeam(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const navItems = [
     { href: "/chats", label: "Чаты", icon: IconChat },
     { href: "/broadcasts", label: "Рассылки", icon: IconSend },
-    { href: "/team", label: "Команда", icon: IconTeam },
+    ...(isOrgTeam ? [{ href: "/team", label: "Команда", icon: IconTeam }] : []),
     { href: "/settings", label: "Настройки", icon: IconSettings },
   ];
 

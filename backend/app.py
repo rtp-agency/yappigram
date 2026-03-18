@@ -537,7 +537,26 @@ async def tg_disconnect(account_id: UUID, user: CurrentUser, db: DB):
     account = result.scalar_one_or_none()
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
-    account.is_active = False
+
+    # Collect contact IDs belonging to this account for cascade deletion
+    contact_rows = await db.execute(select(Contact.id).where(Contact.tg_account_id == account_id))
+    contact_ids = [row[0] for row in contact_rows.all()]
+
+    if contact_ids:
+        # Delete messages, pinned chats, audit logs, broadcast recipients linked to these contacts
+        await db.execute(sa_delete(Message).where(Message.contact_id.in_(contact_ids)))
+        await db.execute(sa_delete(PinnedChat).where(PinnedChat.contact_id.in_(contact_ids)))
+        await db.execute(sa_delete(AuditLog).where(AuditLog.target_contact_id.in_(contact_ids)))
+        await db.execute(sa_delete(BroadcastRecipient).where(BroadcastRecipient.contact_id.in_(contact_ids)))
+        # Delete contacts themselves
+        await db.execute(sa_delete(Contact).where(Contact.tg_account_id == account_id))
+
+    # Delete staff-account assignments
+    await db.execute(sa_delete(StaffTgAccount).where(StaffTgAccount.tg_account_id == account_id))
+
+    # Delete the account record
+    await db.execute(sa_delete(TgAccount).where(TgAccount.id == account_id))
+
     await db.commit()
     await disconnect_account(account_id)
     return {"status": "disconnected"}
