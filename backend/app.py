@@ -505,8 +505,16 @@ async def sso_auth(req: SsoAuthRequest, db: DB):
 # Telegram Accounts
 # ============================================================
 
+MAX_TG_ACCOUNTS = 5  # test version limit
+
 @app.post("/api/tg/connect")
-async def tg_connect(req: TgConnectRequest, user: CurrentUser):
+async def tg_connect(req: TgConnectRequest, user: AdminUser, db: DB):
+    # Check account limit
+    count = await db.execute(
+        select(func.count(TgAccount.id)).where(TgAccount.org_id == _org_id(user))
+    )
+    if count.scalar() >= MAX_TG_ACCOUNTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Максимум {MAX_TG_ACCOUNTS} аккаунтов")
     result = await start_connect(req.phone)
     return {"status": "code_sent", "debug": result}
 
@@ -1467,7 +1475,7 @@ async def list_templates(user: CurrentUser, db: DB):
 
 
 @app.post("/api/templates", response_model=TemplateOut)
-async def create_template(req: TemplateCreate, user: CurrentUser, db: DB):
+async def create_template(req: TemplateCreate, user: AdminUser, db: DB):
     tpl = MessageTemplate(
         title=req.title,
         content=req.content,
@@ -1483,7 +1491,7 @@ async def create_template(req: TemplateCreate, user: CurrentUser, db: DB):
 
 
 @app.patch("/api/templates/{template_id}", response_model=TemplateOut)
-async def update_template(template_id: UUID, req: TemplateUpdate, user: CurrentUser, db: DB):
+async def update_template(template_id: UUID, req: TemplateUpdate, user: AdminUser, db: DB):
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
     tpl = result.scalar_one_or_none()
     if not tpl:
@@ -1496,7 +1504,7 @@ async def update_template(template_id: UUID, req: TemplateUpdate, user: CurrentU
 
 
 @app.delete("/api/templates/{template_id}")
-async def delete_template(template_id: UUID, user: CurrentUser, db: DB):
+async def delete_template(template_id: UUID, user: AdminUser, db: DB):
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
     tpl = result.scalar_one_or_none()
     if not tpl:

@@ -1044,15 +1044,16 @@ function ChatsContent() {
                               <img
                                 src={mediaUrl(m.media_path)}
                                 alt=""
+                                loading="lazy"
                                 className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
                                 onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
                               />
                             )}
                             {m.media_type === "video" && (
-                              <video src={mediaUrl(m.media_path)} controls className="rounded-xl max-w-full max-h-64" />
+                              <video src={mediaUrl(m.media_path)} controls preload="none" className="rounded-xl max-w-full max-h-64" />
                             )}
                             {m.media_type === "voice" && (
-                              <audio src={mediaUrl(m.media_path)} controls className="w-full" />
+                              <audio src={mediaUrl(m.media_path)} controls preload="none" className="w-full" />
                             )}
                             {m.media_type === "document" && (() => {
                               const ext = m.media_path!.split('.').pop()?.toLowerCase() || '';
@@ -1061,6 +1062,7 @@ function ChatsContent() {
                                 <img
                                   src={mediaUrl(m.media_path!)}
                                   alt=""
+                                  loading="lazy"
                                   className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
                                   onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
                                 />
