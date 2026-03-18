@@ -21,7 +21,8 @@ export default function LoginPage() {
     const accessToken = params.get("access_token");
     const refreshToken = params.get("refresh_token");
     if (accessToken && refreshToken) {
-      saveTokens({ access_token: accessToken, refresh_token: refreshToken, role: "operator" });
+      const role = params.get("role") || "operator";
+      saveTokens({ access_token: accessToken, refresh_token: refreshToken, role });
       router.replace("/chats");
       return;
     }
