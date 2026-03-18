@@ -1273,7 +1273,7 @@ function ChatsContent() {
             )}
 
             {/* Input */}
-            <div className="p-3 border-t border-surface-border bg-surface-card/30 backdrop-blur-sm">
+            <div className="p-3 border-t border-surface-border bg-surface-card/30 backdrop-blur-sm" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0.75rem))' }}>
               <div className="flex gap-1 items-center bg-surface-card border border-surface-border rounded-2xl px-1">
                 <input
                   ref={fileInputRef}
@@ -1381,37 +1381,57 @@ function ChatsContent() {
       </div>
 
       {/* Forward contact picker modal */}
-      {showForwardPicker && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in" onClick={() => setShowForwardPicker(false)}>
-          <div className="bg-surface-card border border-surface-border rounded-2xl w-full max-w-sm mx-4 max-h-[60vh] flex flex-col animate-slide-up" onClick={(e) => e.stopPropagation()}>
-            <div className="p-4 border-b border-surface-border">
-              <h3 className="font-semibold">Forward to...</h3>
-            </div>
-            <div className="flex-1 overflow-auto">
-              {contacts.filter((c) => c.id !== selected?.id && c.status === "approved").map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => doForward(c.id)}
-                  className="w-full text-left px-4 py-3 hover:bg-surface-hover transition-colors border-b border-surface-border/50 flex items-center gap-2"
-                >
-                  {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") && (
-                    <svg className="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
-                      <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                    </svg>
+      {showForwardPicker && (() => {
+        const ForwardPicker = () => {
+          const [fwdSearch, setFwdSearch] = useState("");
+          const filtered = contacts
+            .filter((c) => c.id !== selected?.id && c.status === "approved")
+            .filter((c) => !fwdSearch || c.alias.toLowerCase().includes(fwdSearch.toLowerCase()));
+          return (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in" onClick={() => setShowForwardPicker(false)}>
+              <div className="bg-surface-card border border-surface-border rounded-2xl w-full max-w-sm mx-4 max-h-[60vh] flex flex-col animate-slide-up" onClick={(e) => e.stopPropagation()}>
+                <div className="p-4 border-b border-surface-border space-y-2">
+                  <h3 className="font-semibold">Переслать</h3>
+                  <input
+                    type="text"
+                    placeholder="Поиск контакта..."
+                    value={fwdSearch}
+                    onChange={(e) => setFwdSearch(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-surface border border-surface-border text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand/40"
+                    autoFocus
+                  />
+                </div>
+                <div className="flex-1 overflow-auto">
+                  {filtered.length === 0 && (
+                    <div className="p-4 text-center text-sm text-slate-500">Ничего не найдено</div>
                   )}
-                  <span className="text-sm font-medium">{c.alias}</span>
-                </button>
-              ))}
+                  {filtered.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => doForward(c.id)}
+                      className="w-full text-left px-4 py-3 hover:bg-surface-hover transition-colors border-b border-surface-border/50 flex items-center gap-2"
+                    >
+                      {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") && (
+                        <svg className="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
+                          <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                        </svg>
+                      )}
+                      <span className="text-sm font-medium">{c.alias}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="p-3 border-t border-surface-border">
+                  <Button onClick={() => setShowForwardPicker(false)} variant="ghost" className="w-full">
+                    Отмена
+                  </Button>
+                </div>
+              </div>
             </div>
-            <div className="p-3 border-t border-surface-border">
-              <Button onClick={() => setShowForwardPicker(false)} variant="ghost" className="w-full">
-                Cancel
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+          );
+        };
+        return <ForwardPicker />;
+      })()}
 
       {/* Create group modal */}
       {showCreateGroup && (
