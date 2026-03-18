@@ -1251,13 +1251,15 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
     if target.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Target contact not approved")
 
-    # Get TG message IDs for the requested messages
+    # Get source messages (keep order, preserve content/media for CRM records)
+    src_messages = []
     tg_msg_ids = []
     for msg_id in req.message_ids:
         rr = await db.execute(select(Message).where(Message.id == msg_id, Message.contact_id == contact_id))
         msg = rr.scalar_one_or_none()
         if msg and msg.tg_message_id:
             tg_msg_ids.append(msg.tg_message_id)
+            src_messages.append(msg)
 
     if not tg_msg_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid messages to forward")
@@ -1266,14 +1268,17 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
         source.tg_account_id, source.real_tg_id, tg_msg_ids, target.real_tg_id,
     )
 
-    # Save forwarded messages in CRM
+    # Save forwarded messages in CRM — carry over content + media from source
     saved = []
-    for fwd_tg_id in fwd_ids:
+    for i, fwd_tg_id in enumerate(fwd_ids):
+        src = src_messages[i] if i < len(src_messages) else None
         fwd_msg = Message(
             contact_id=target.id,
             tg_message_id=fwd_tg_id,
             direction="outgoing",
-            content="[forwarded]",
+            content=src.content if src else None,
+            media_type=src.media_type if src else None,
+            media_path=src.media_path if src else None,
             sent_by=user.id,
             forwarded_from_alias=source.alias,
         )

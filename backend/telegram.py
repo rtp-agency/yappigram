@@ -201,6 +201,100 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
     """Register message handler and store client."""
     _clients[account.id] = client
 
+    @client.on(events.NewMessage(outgoing=True))
+    async def on_outgoing_message(event):
+        """Capture messages sent directly from Telegram (not through CRM)."""
+        msg_obj = event.message
+        chat = await event.get_chat()
+        if not chat:
+            return
+
+        is_group = event.is_group or event.is_channel
+        peer_tg_id = event.chat_id
+
+        async with async_session() as db:
+            # Only save if contact exists and is approved
+            result = await db.execute(
+                select(Contact).where(
+                    Contact.real_tg_id == peer_tg_id,
+                    Contact.tg_account_id == account.id,
+                )
+            )
+            contact = result.scalar_one_or_none()
+            if not contact or contact.status != "approved":
+                return
+
+            # Skip if message already saved (sent through CRM)
+            existing = await db.execute(
+                select(Message).where(
+                    Message.tg_message_id == msg_obj.id,
+                    Message.contact_id == contact.id,
+                )
+            )
+            if existing.scalar_one_or_none():
+                return
+
+            # Media
+            media_type, ext = _extract_media(msg_obj)
+            media_path = None
+            if media_type and ext is not None:
+                filename = f"{contact.id}_{msg_obj.id}{ext}"
+                filepath = os.path.join(MEDIA_DIR, filename)
+                actual_path = await msg_obj.download_media(file=filepath)
+                if actual_path:
+                    media_path = os.path.basename(actual_path)
+                else:
+                    media_path = filename
+
+            # Forwarded from
+            forwarded_from_alias = None
+            if msg_obj.fwd_from:
+                fwd = msg_obj.fwd_from
+                fwd_peer_id = None
+                if hasattr(fwd, "from_id") and fwd.from_id:
+                    fid = fwd.from_id
+                    if hasattr(fid, "user_id"):
+                        fwd_peer_id = fid.user_id
+                    elif hasattr(fid, "channel_id"):
+                        fwd_peer_id = -fid.channel_id
+                if fwd_peer_id:
+                    fr = await db.execute(select(Contact).where(Contact.real_tg_id == fwd_peer_id))
+                    fwd_contact = fr.scalar_one_or_none()
+                    forwarded_from_alias = fwd_contact.alias if fwd_contact else "[hidden]"
+                else:
+                    forwarded_from_alias = "[hidden]"
+
+            sanitized_content = sanitize_text(msg_obj.text)
+            msg = Message(
+                contact_id=contact.id,
+                tg_message_id=msg_obj.id,
+                direction="outgoing",
+                content=sanitized_content,
+                media_type=media_type,
+                media_path=media_path,
+                forwarded_from_alias=forwarded_from_alias,
+            )
+            db.add(msg)
+            contact.last_message_at = func.now()
+            await db.commit()
+            await db.refresh(msg)
+
+            # Broadcast to CRM
+            await ws_manager.broadcast_to_admins({
+                "type": "new_message",
+                "contact_id": str(contact.id),
+                "message": {
+                    "id": str(msg.id),
+                    "direction": "outgoing",
+                    "content": msg.content,
+                    "media_type": msg.media_type,
+                    "media_path": msg.media_path,
+                    "forwarded_from_alias": msg.forwarded_from_alias,
+                    "is_deleted": False,
+                    "created_at": str(msg.created_at),
+                },
+            })
+
     @client.on(events.NewMessage(incoming=True))
     async def on_new_message(event):
         msg_obj = event.message
@@ -565,8 +659,29 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                         "message_id": str(msg.id),
                     })
 
-    # Run client in background
-    asyncio.create_task(client.run_until_disconnected())
+    # Run client in background with auto-reconnect
+    async def _run_with_reconnect():
+        while True:
+            try:
+                await client.run_until_disconnected()
+            except Exception as e:
+                print(f"[TELETHON] Client for {account.phone} disconnected: {e}")
+            # Check if we were intentionally removed
+            if account.id not in _clients:
+                break
+            print(f"[TELETHON] Reconnecting {account.phone} in 5s...")
+            await asyncio.sleep(5)
+            try:
+                await client.connect()
+                if await client.is_user_authorized():
+                    print(f"[TELETHON] Reconnected {account.phone}")
+                else:
+                    print(f"[TELETHON] {account.phone} no longer authorized, stopping")
+                    break
+            except Exception as e:
+                print(f"[TELETHON] Reconnect failed for {account.phone}: {e}")
+
+    asyncio.create_task(_run_with_reconnect())
 
 
 async def send_message(
