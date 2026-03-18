@@ -159,7 +159,7 @@ function ChatsContent() {
         });
         if (isCurrentChat) {
           setMessages((prev) => {
-            if (prev.some((m) => m.id === event.message.id)) return prev;
+            if (prev.some((m) => m.id === event.message.id || (m.tg_message_id && m.tg_message_id === event.message.tg_message_id))) return prev;
             return [...prev, event.message];
           });
           // Mark as read immediately since user is viewing this chat
@@ -324,7 +324,7 @@ function ChatsContent() {
       // Restore text on failure
       setText(savedText);
       alert(e.message);
-    } finally { sendingRef.current = false; }
+    } finally { sendingRef.current = false; setSending(false); }
   };
 
   // Apply template: set text and send media if template has it
@@ -799,18 +799,18 @@ function ChatsContent() {
                 className="hidden md:block px-2 py-1.5 rounded-xl border border-surface-border bg-surface-card text-xs text-slate-400 focus:outline-none focus:border-brand/30 cursor-pointer shrink-0"
                 title="Перевод входящих"
               >
-                <option value="ru">📥 RU</option>
-                <option value="en">📥 EN</option>
-                <option value="es">📥 ES</option>
-                <option value="de">📥 DE</option>
-                <option value="fr">📥 FR</option>
-                <option value="zh">📥 ZH</option>
-                <option value="ar">📥 AR</option>
-                <option value="pt">📥 PT</option>
-                <option value="ja">📥 JA</option>
-                <option value="ko">📥 KO</option>
-                <option value="uk">📥 UK</option>
-                <option value="tr">📥 TR</option>
+                <option value="ru">🔽 RU</option>
+                <option value="en">🔽 EN</option>
+                <option value="es">🔽 ES</option>
+                <option value="de">🔽 DE</option>
+                <option value="fr">🔽 FR</option>
+                <option value="zh">🔽 ZH</option>
+                <option value="ar">🔽 AR</option>
+                <option value="pt">🔽 PT</option>
+                <option value="ja">🔽 JA</option>
+                <option value="ko">🔽 KO</option>
+                <option value="uk">🔽 UK</option>
+                <option value="tr">🔽 TR</option>
               </select>
               <select
                 value={translateLangOut}
@@ -818,18 +818,18 @@ function ChatsContent() {
                 className="hidden md:block px-2 py-1.5 rounded-xl border border-surface-border bg-surface-card text-xs text-slate-400 focus:outline-none focus:border-brand/30 cursor-pointer shrink-0"
                 title="Перевод исходящих"
               >
-                <option value="en">📤 EN</option>
-                <option value="ru">📤 RU</option>
-                <option value="es">📤 ES</option>
-                <option value="de">📤 DE</option>
-                <option value="fr">📤 FR</option>
-                <option value="zh">📤 ZH</option>
-                <option value="ar">📤 AR</option>
-                <option value="pt">📤 PT</option>
-                <option value="ja">📤 JA</option>
-                <option value="ko">📤 KO</option>
-                <option value="uk">📤 UK</option>
-                <option value="tr">📤 TR</option>
+                <option value="en">🔼 EN</option>
+                <option value="ru">🔼 RU</option>
+                <option value="es">🔼 ES</option>
+                <option value="de">🔼 DE</option>
+                <option value="fr">🔼 FR</option>
+                <option value="zh">🔼 ZH</option>
+                <option value="ar">🔼 AR</option>
+                <option value="pt">🔼 PT</option>
+                <option value="ja">🔼 JA</option>
+                <option value="ko">🔼 KO</option>
+                <option value="uk">🔼 UK</option>
+                <option value="tr">🔼 TR</option>
               </select>
 
               {/* Forward mode toggle */}
@@ -975,9 +975,9 @@ function ChatsContent() {
                       <div
                         id={`msg-${m.id}`}
                         className={`px-3.5 py-2.5 rounded-2xl text-sm overflow-hidden break-words ${
-                          m.is_deleted ? "opacity-50" : ""
+                          m.is_deleted ? "ring-2 ring-red-500/60 opacity-60" : ""
                         } ${
-                          m.is_edited && !m.is_deleted ? "ring-1 ring-amber-400/30" : ""
+                          m.is_edited && !m.is_deleted ? "ring-2 ring-amber-400/50" : ""
                         } ${
                           m.direction === "outgoing"
                             ? "bg-gradient-to-br from-brand to-brand-dark text-white rounded-br-md shadow-[0_2px_8px_rgba(14,165,233,0.2)]"
