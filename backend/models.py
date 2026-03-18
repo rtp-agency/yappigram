@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy import UniqueConstraint
 
 from config import settings
 
@@ -28,6 +29,9 @@ class Base(AsyncAttrs, DeclarativeBase):
 
 class Staff(Base):
     __tablename__ = "staff"
+    __table_args__ = (
+        UniqueConstraint('postforge_user_id', 'postforge_org_id', name='uq_staff_pf_user_org'),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tg_user_id = Column(BigInteger, unique=True, nullable=False)
@@ -36,6 +40,19 @@ class Staff(Base):
     name = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=func.now())
+
+    # PostForge SSO link
+    postforge_user_id = Column(String, nullable=True)
+    postforge_org_id = Column(String, nullable=True, index=True)
+
+    # Real Telegram user ID (for Mini App auth across org contexts)
+    real_tg_id = Column(BigInteger, nullable=True, index=True)
+
+    # Signature: "named" (shows staff name) or "anonymous" (hides)
+    signature_mode = Column(String, default="named")
+
+    # Admin setting: show real contact names to operators (default: aliases only)
+    show_real_names = Column(Boolean, default=False)
 
     assigned_contacts = relationship("Contact", back_populates="assigned_operator")
 
@@ -48,6 +65,7 @@ class TgAccount(Base):
     session_file = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     connected_at = Column(DateTime, default=func.now())
+    org_id = Column(String, nullable=True, index=True)
 
     contacts = relationship("Contact", back_populates="tg_account")
 
@@ -73,8 +91,9 @@ class Contact(Base):
 
     # CRM data
     assigned_to = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)
-    tags = Column(ARRAY(String), default=[])
+    tags = Column(ARRAY(String), default=list)
     notes = Column(Text)
+    is_archived = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=func.now())
     approved_at = Column(DateTime, nullable=True)
@@ -132,6 +151,7 @@ class Tag(Base):
     name = Column(String, nullable=False)
     color = Column(String, default="#6366f1")
     created_by = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)
+    org_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=func.now())
 
 
@@ -176,3 +196,64 @@ class AuditLog(Base):
     action = Column(String, nullable=False)  # reveal_data | block_contact | ...
     target_contact_id = Column(UUID(as_uuid=True), ForeignKey("contacts.id"), nullable=True)
     created_at = Column(DateTime, default=func.now())
+
+
+class MessageTemplate(Base):
+    """Quick reply templates / scripts."""
+    __tablename__ = "message_templates"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    category = Column(String, nullable=True)  # grouping label
+    shortcut = Column(String, nullable=True)  # e.g. "/hello" trigger
+    media_path = Column(String, nullable=True)
+    media_type = Column(String, nullable=True)  # photo | video | video_note | voice | document
+    created_by = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)
+    org_id = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class Broadcast(Base):
+    """Mass message campaign."""
+    __tablename__ = "broadcasts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=True)
+    media_path = Column(String, nullable=True)
+    media_type = Column(String, nullable=True)  # photo | video | document
+
+    # Targeting
+    tg_account_id = Column(UUID(as_uuid=True), ForeignKey("tg_accounts.id"), nullable=False)
+    tag_filter = Column(ARRAY(String), default=list)  # only contacts with these tags (empty = all)
+    max_recipients = Column(Integer, nullable=True)  # Random N from filtered set
+    contact_ids = Column(ARRAY(UUID(as_uuid=True)), default=list)  # Manual selection
+
+    # Delay between sends (seconds)
+    delay_seconds = Column(Integer, default=1)  # 1s to 3600s
+
+    # Status
+    status = Column(String, default="draft")  # draft | running | paused | completed | cancelled
+    total_recipients = Column(Integer, default=0)
+    sent_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+
+    created_by = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)
+    org_id = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime, default=func.now())
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class BroadcastRecipient(Base):
+    """Individual recipient status for a broadcast."""
+    __tablename__ = "broadcast_recipients"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    broadcast_id = Column(UUID(as_uuid=True), ForeignKey("broadcasts.id", ondelete="CASCADE"), nullable=False)
+    contact_id = Column(UUID(as_uuid=True), ForeignKey("contacts.id"), nullable=False)
+    status = Column(String, default="pending")  # pending | sent | failed
+    sent_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)

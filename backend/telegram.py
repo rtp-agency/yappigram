@@ -22,10 +22,55 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 # Active Telethon clients: tg_account_id -> TelegramClient
 _clients: dict[UUID, TelegramClient] = {}
 
-# Pending auth flows: phone -> TelegramClient (temporary, before session saved)
-_pending_auth: dict[str, TelegramClient] = {}
+# Pending auth flows: phone -> (TelegramClient, created_at)
+_pending_auth: dict[str, tuple[TelegramClient, float]] = {}
+
+def _cleanup_pending_auth():
+    """Remove stale pending auth sessions older than 5 minutes."""
+    import time
+    now = time.time()
+    stale = [phone for phone, (_, ts) in _pending_auth.items() if now - ts > 300]
+    for phone in stale:
+        client, _ = _pending_auth.pop(phone)
+        asyncio.create_task(client.disconnect())
 
 _USERNAME_RE = re.compile(r"@[A-Za-z0-9_]{4,}")
+
+# Topic name cache: (account_id, peer_id, topic_id) -> topic_name
+_topic_cache: dict[tuple, str] = {}
+
+
+async def _resolve_topic_name(client: TelegramClient, peer_id: int, topic_id: int, account_id: UUID) -> str | None:
+    """Resolve topic name for a forum supergroup, with caching."""
+    if topic_id == 1:
+        return "General"
+    cache_key = (account_id, peer_id, topic_id)
+    if cache_key in _topic_cache:
+        return _topic_cache[cache_key]
+    try:
+        # The topic creation message (service message) has the topic title
+        # Topic ID = message ID of the service message that created the topic
+        from telethon.tl.functions.channels import GetForumTopicsByIDRequest
+        entity = await client.get_input_entity(peer_id)
+        result = await client(GetForumTopicsByIDRequest(channel=entity, topics=[topic_id]))
+        if result.topics:
+            name = result.topics[0].title
+            _topic_cache[cache_key] = name
+            return name
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    # Fallback: try to read the service message that created the topic
+    try:
+        msgs = await client.get_messages(peer_id, ids=topic_id)
+        if msgs and hasattr(msgs, "action") and hasattr(msgs.action, "title"):
+            name = msgs.action.title
+            _topic_cache[cache_key] = name
+            return name
+    except Exception:
+        pass
+    return None
 
 
 def _session_path(phone: str) -> str:
@@ -49,21 +94,39 @@ def sanitize_text(text: str | None) -> str | None:
     return _USERNAME_RE.sub("[hidden]", text)
 
 
-async def start_connect(phone: str) -> None:
+async def start_connect(phone: str) -> dict:
     """Step 1: send auth code to the phone."""
+    import logging
+    log = logging.getLogger("tg_connect")
+    log.info(f"start_connect called for phone={phone}")
     client = TelegramClient(
         _session_path(phone),
         settings.TG_API_ID,
         settings.TG_API_HASH,
     )
     await client.connect()
-    await client.send_code_request(phone)
-    _pending_auth[phone] = client
+    log.info(f"connected, is_authorized={await client.is_user_authorized()}")
+    try:
+        result = await client.send_code_request(phone, force_sms=True)
+        log.info(f"send_code_request OK: type={type(result.type).__name__}, phone_code_hash={result.phone_code_hash[:8]}...")
+        # Disconnect previous pending client for same phone
+        import time
+        if phone in _pending_auth:
+            old_client, _ = _pending_auth.pop(phone)
+            await old_client.disconnect()
+        _cleanup_pending_auth()
+        _pending_auth[phone] = (client, time.time())
+        return {"type": type(result.type).__name__, "hash": result.phone_code_hash[:8]}
+    except Exception as e:
+        log.error(f"send_code_request FAILED: {type(e).__name__}: {e}")
+        await client.disconnect()
+        raise
 
 
 async def verify_code(phone: str, code: str, password_2fa: str | None = None) -> TgAccount:
     """Step 2: verify code (and optional 2FA), save session, return TgAccount."""
-    client = _pending_auth.get(phone)
+    entry = _pending_auth.get(phone)
+    client = entry[0] if entry else None
     if not client:
         raise ValueError("No pending auth for this phone. Call connect first.")
 
@@ -74,14 +137,20 @@ async def verify_code(phone: str, code: str, password_2fa: str | None = None) ->
             raise ValueError("2FA password required")
         await client.sign_in(password=password_2fa)
 
-    # Save to DB
+    # Save to DB (upsert — reactivate if already exists)
     async with async_session() as db:
-        account = TgAccount(
-            phone=phone,
-            session_file=_session_path(phone),
-            is_active=True,
-        )
-        db.add(account)
+        result = await db.execute(select(TgAccount).where(TgAccount.phone == phone))
+        account = result.scalar_one_or_none()
+        if account:
+            account.session_file = _session_path(phone)
+            account.is_active = True
+        else:
+            account = TgAccount(
+                phone=phone,
+                session_file=_session_path(phone),
+                is_active=True,
+            )
+            db.add(account)
         await db.commit()
         await db.refresh(account)
 
@@ -160,6 +229,9 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             # General topic (id=1)
             topic_id = 1
 
+        if topic_id is not None:
+            topic_name = await _resolve_topic_name(client, peer_tg_id, topic_id, account.id)
+
         async with async_session() as db:
             # --- CONTACT LOOKUP / CREATION ---
             result = await db.execute(
@@ -199,7 +271,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                             alias=generate_alias(group_title, seq),
                             chat_type=chat_type,
                             is_forum=is_forum,
-                            status="pending",
+                            status="approved",
                         )
                     else:
                         contact = Contact(
@@ -209,7 +281,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                             real_username_encrypted=encrypt(username) if username else None,
                             alias=generate_alias(first_name, seq),
                             chat_type="private",
-                            status="pending",
+                            status="approved",
                         )
                     db.add(contact)
                     try:
@@ -393,7 +465,6 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
     async def on_message_edited(event):
         msg_obj = event.message
         async with async_session() as db:
-            # Match by tg_message_id (could be incoming or outgoing)
             result = await db.execute(
                 select(Message).where(
                     Message.tg_message_id == msg_obj.id,
@@ -403,10 +474,20 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             if not msg:
                 return
 
-            # Update content, inline buttons, mark as edited
-            msg.content = sanitize_text(msg_obj.text)
-            msg.inline_buttons = _extract_inline_buttons(msg_obj)
-            msg.is_edited = True
+            new_content = sanitize_text(msg_obj.text)
+            new_buttons = _extract_inline_buttons(msg_obj)
+
+            # Detect if content actually changed (reactions trigger MessageEdited too)
+            content_changed = (new_content or "") != (msg.content or "")
+            buttons_changed = new_buttons != msg.inline_buttons
+
+            if not content_changed and not buttons_changed:
+                return  # Reaction or pin — not a real edit
+
+            msg.content = new_content
+            msg.inline_buttons = new_buttons
+            if content_changed:
+                msg.is_edited = True
             await db.commit()
 
             await ws_manager.broadcast_to_admins({
@@ -415,7 +496,50 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 "message_id": str(msg.id),
                 "content": msg.content,
                 "inline_buttons": msg.inline_buttons,
-                "is_edited": True,
+                "is_edited": msg.is_edited,
+            })
+
+    @client.on(events.MessageRead(inbox=False))
+    async def on_message_read(event):
+        """Track when the other party reads our outgoing messages."""
+        max_id = event.max_id
+        peer_id = event.chat_id
+        if not max_id or not peer_id:
+            return
+        async with async_session() as db:
+            # Find contact by peer tg_id
+            result = await db.execute(
+                select(Contact).where(
+                    Contact.tg_account_id == account.id,
+                    Contact.real_tg_id == peer_id,
+                )
+            )
+            contact = result.scalar_one_or_none()
+            if not contact:
+                return
+
+            # Mark all outgoing messages up to max_id as read
+            result = await db.execute(
+                select(Message).where(
+                    Message.contact_id == contact.id,
+                    Message.direction == "outgoing",
+                    Message.tg_message_id <= max_id,
+                    Message.is_read.is_(False),
+                )
+            )
+            unread_msgs = result.scalars().all()
+            if not unread_msgs:
+                return
+            msg_ids = []
+            for m in unread_msgs:
+                m.is_read = True
+                msg_ids.append(str(m.id))
+            await db.commit()
+
+            await ws_manager.broadcast_to_admins({
+                "type": "messages_read",
+                "contact_id": str(contact.id),
+                "message_ids": msg_ids,
             })
 
     @client.on(events.MessageDeleted)
@@ -451,8 +575,14 @@ async def send_message(
     text: str | None = None,
     file_path: str | None = None,
     reply_to_tg_msg_id: int | None = None,
+    media_type: str | None = None,
 ) -> int | None:
-    """Send a message or file via Telethon and return tg_message_id."""
+    """Send a message or file via Telethon and return tg_message_id.
+
+    media_type: photo | video | document | voice | video_note
+    - voice: sends as voice message (ogg opus)
+    - video_note: sends as round video message (circle)
+    """
     client = _clients.get(account_id)
     if not client:
         raise ValueError("Telegram account not connected")
@@ -460,7 +590,14 @@ async def send_message(
     if reply_to_tg_msg_id:
         kwargs["reply_to"] = reply_to_tg_msg_id
     if file_path:
-        result = await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
+        if media_type == "voice":
+            kwargs["voice_note"] = True
+            result = await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
+        elif media_type == "video_note":
+            kwargs["video_note"] = True
+            result = await client.send_file(tg_id, file_path, **kwargs)  # video notes have no caption
+        else:
+            result = await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
     else:
         result = await client.send_message(tg_id, text, **kwargs)
     return result.id
@@ -498,6 +635,22 @@ async def forward_message(
         except Exception as e:
             print(f"[FORWARD] Failed to copy message {tg_msg_id}: {e}")
     return sent_ids
+
+
+async def delete_messages(
+    account_id: UUID,
+    tg_peer_id: int,
+    tg_msg_ids: list[int],
+) -> None:
+    """Delete messages from Telegram chat."""
+    client = _clients.get(account_id)
+    if not client:
+        raise ValueError("Telegram account not connected")
+    from telethon.tl.functions.messages import DeleteMessagesRequest
+    try:
+        await client.delete_messages(tg_peer_id, tg_msg_ids)
+    except Exception as e:
+        print(f"[DELETE] Failed to delete messages: {e}")
 
 
 async def press_inline_button(

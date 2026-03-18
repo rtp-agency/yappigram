@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     WEBAPP_URL: str = ""  # Public HTTPS URL for TG Mini App (e.g. https://crm.example.com)
     CORS_ORIGINS: str = "http://localhost:3000"
 
+    # SSO — PostForge integration
+    POSTFORGE_API_URL: str = ""  # e.g. http://backend:8000 (internal) or https://metra-ai.org
+    POSTFORGE_SSO_SECRET: str = ""  # Shared secret for SSO token exchange
+    POSTFORGE_BOT_TOKEN: str = ""  # PostForge bot token (for Mini App initData validation)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

@@ -1,0 +1,8 @@
+__pycache__
+*.pyc
+.env
+sessions/
+media/
+.git
+*.session
+.pytest_cache

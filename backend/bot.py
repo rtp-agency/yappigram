@@ -62,7 +62,7 @@ def _mini_app_button() -> InlineKeyboardMarkup:
         return None
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text="Open YappiGram",
+            text="📱 METRA CRM",
             web_app=WebAppInfo(url=settings.WEBAPP_URL),
         )]
     ])
@@ -589,7 +589,7 @@ async def start_bot_polling() -> None:
         try:
             await b.set_chat_menu_button(
                 menu_button=MenuButtonWebApp(
-                    text="YappiGram",
+                    text="METRA CRM",
                     web_app=WebAppInfo(url=settings.WEBAPP_URL),
                 )
             )

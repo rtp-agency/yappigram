@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { clearTokens, getRole, getTokens, isTelegramWebApp, getTgWebApp } from "./lib";
+import { clearTokens, disconnectWS, getTokens, isTelegramWebApp, getTgWebApp } from "./lib";
 
 // ============================================================
 // SVG Icons
@@ -13,15 +13,6 @@ function IconChat({ className = "w-5 h-5" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-    </svg>
-  );
-}
-
-function IconQueue({ className = "w-5 h-5" }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <polyline points="12 6 12 12 16 14" />
     </svg>
   );
 }
@@ -42,6 +33,15 @@ function IconSettings({ className = "w-5 h-5" }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function IconSend({ className = "w-5 h-5" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
     </svg>
   );
 }
@@ -90,16 +90,15 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const role = getRole();
-  const isAdmin = role === "admin" || role === "super_admin";
   const [isTg, setIsTg] = useState(false);
 
   const navItems = [
-    { href: "/chats", label: "Chats", icon: IconChat },
-    ...(isAdmin ? [{ href: "/queue", label: "Queue", icon: IconQueue }] : []),
-    ...(isAdmin ? [{ href: "/team", label: "Team", icon: IconTeam }] : []),
-    { href: "/settings", label: "Settings", icon: IconSettings },
+    { href: "/chats", label: "Чаты", icon: IconChat },
+    { href: "/broadcasts", label: "Рассылки", icon: IconSend },
+    { href: "/team", label: "Команда", icon: IconTeam },
+    { href: "/settings", label: "Настройки", icon: IconSettings },
   ];
+
 
   useEffect(() => {
     const tg = isTelegramWebApp();
@@ -129,6 +128,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [isTg, pathname, router]);
 
   const logout = () => {
+    disconnectWS();
     clearTokens();
     if (isTg) {
       getTgWebApp()?.close();
@@ -142,9 +142,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Desktop sidebar — hidden in TG Mini App */}
       {!isTg && (
         <nav className="hidden md:flex flex-col w-56 bg-gradient-to-b from-surface-card to-surface border-r border-surface-border p-4">
-          <h1 className="text-xl font-bold bg-gradient-to-r from-brand to-accent bg-clip-text text-transparent mb-8">
-            YappiGram
-          </h1>
+          <div className="flex items-center gap-2.5 mb-8">
+            <div className="w-9 h-9 bg-brand/90 rounded-xl flex items-center justify-center flex-shrink-0 shadow-lg shadow-brand/20">
+              <img src="/metra-icon.png" alt="" className="w-5 h-5 object-contain" />
+            </div>
+            <div>
+              <img src="/metra-wordmark.png" alt="METRA" className="h-3.5 object-contain brightness-0 invert" />
+              <div className="text-[10px] text-brand font-semibold tracking-widest mt-0.5">CRM</div>
+            </div>
+          </div>
           <div className="flex flex-col gap-1 flex-1">
             {navItems.map((item) => {
               const Icon = item.icon;
@@ -170,7 +176,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             className="flex items-center gap-2 text-sm text-slate-500 hover:text-red-400 transition-colors mt-auto px-3 py-2"
           >
             <IconLogout className="w-4 h-4" />
-            Logout
+            Выход
           </button>
         </nav>
       )}

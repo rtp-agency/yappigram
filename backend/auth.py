@@ -80,30 +80,34 @@ def require_role(*roles: str):
     return checker
 
 
-def _extract_bot_id() -> str:
-    """Extract bot ID (numeric part before ':') from bot token."""
-    return settings.TG_BOT_TOKEN.split(":")[0]
+def _get_bot_tokens() -> list[str]:
+    """Get all bot tokens to try for validation (CRM bot + PostForge bot)."""
+    tokens = []
+    if settings.TG_BOT_TOKEN:
+        tokens.append(settings.TG_BOT_TOKEN)
+    if settings.POSTFORGE_BOT_TOKEN:
+        tokens.append(settings.POSTFORGE_BOT_TOKEN)
+    return tokens
 
 
 def validate_tg_init_data(init_data: str) -> dict:
     """Validate Telegram Mini App initData using Ed25519 signature.
 
-    Supports the new Telegram validation format (2024+) with Ed25519 signatures,
-    and falls back to HMAC-SHA256 for older clients.
+    Tries all configured bot tokens (CRM + PostForge) since Mini App
+    could be launched from either bot.
 
     Returns parsed user data dict with keys like 'id', 'first_name', etc.
     Raises HTTPException if validation fails.
     """
-    if not settings.TG_BOT_TOKEN:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Bot token not configured")
+    bot_tokens = _get_bot_tokens()
+    if not bot_tokens:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "No bot token configured")
 
     parsed = parse_qs(init_data)
 
     # Try Ed25519 validation first (new format with 'signature' field)
     signature_b64 = parsed.get("signature", [None])[0]
     if signature_b64:
-        # Build data-check-string: "{bot_id}:WebAppData\n{sorted_pairs}"
-        # Values must be URL-decoded; exclude 'hash' and 'signature'
         decoded_init = unquote(init_data)
         data_pairs = []
         for key_val in decoded_init.split("&"):
@@ -112,20 +116,22 @@ def validate_tg_init_data(init_data: str) -> dict:
                 data_pairs.append(key_val)
         data_pairs.sort()
 
-        bot_id = _extract_bot_id()
-        data_check_string = f"{bot_id}:WebAppData\n" + "\n".join(data_pairs)
-
-        # Fix base64url padding
         sig_padded = signature_b64 + "=" * (4 - len(signature_b64) % 4) if len(signature_b64) % 4 else signature_b64
-        try:
-            sig_bytes = base64.urlsafe_b64decode(sig_padded)
-            print(f"[TG_AUTH] bot_id: {bot_id}")
-            print(f"[TG_AUTH] data_check_string: {repr(data_check_string[:400])}")
-            print(f"[TG_AUTH] signature_b64: {signature_b64}")
-            print(f"[TG_AUTH] sig_bytes len: {len(sig_bytes)}")
-            _TG_PUBLIC_KEY.verify(sig_bytes, data_check_string.encode())
-        except Exception as e:
-            print(f"[TG_AUTH] Ed25519 verification failed: {type(e).__name__}: {e}")
+        sig_bytes = base64.urlsafe_b64decode(sig_padded)
+
+        # Try each bot token's bot_id
+        verified = False
+        for token in bot_tokens:
+            bot_id = token.split(":")[0]
+            data_check_string = f"{bot_id}:WebAppData\n" + "\n".join(data_pairs)
+            try:
+                _TG_PUBLIC_KEY.verify(sig_bytes, data_check_string.encode())
+                verified = True
+                break
+            except Exception:
+                continue
+
+        if not verified:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid initData signature")
     else:
         # Fallback to HMAC-SHA256 (old format)
@@ -141,10 +147,15 @@ def validate_tg_init_data(init_data: str) -> dict:
         data_pairs.sort()
         data_check_string = "\n".join(data_pairs)
 
-        secret_key = hmac.new(b"WebAppData", settings.TG_BOT_TOKEN.encode(), hashlib.sha256).digest()
-        computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        verified = False
+        for token in bot_tokens:
+            secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+            computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+            if hmac.compare_digest(computed_hash, received_hash):
+                verified = True
+                break
 
-        if not hmac.compare_digest(computed_hash, received_hash):
+        if not verified:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid initData signature")
 
     # Parse user JSON

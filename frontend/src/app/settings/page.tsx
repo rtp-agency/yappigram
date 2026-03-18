@@ -1,8 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, getRole } from "@/lib";
+import { api, clearTokens, getTemplates, createTemplate, deleteTemplate, syncDialogs, getRole } from "@/lib";
+import type { Template } from "@/lib";
 import { AppShell, AuthGuard, Button, Input } from "@/components";
+import { useRouter } from "next/navigation";
+
+const isTelegramWebApp = () => typeof window !== "undefined" && !!(window as any).Telegram?.WebApp?.initData;
+
+const isAdminRole = () => ["super_admin", "admin"].includes(getRole() || "");
 
 export default function SettingsPage() {
   return (
@@ -15,15 +21,52 @@ export default function SettingsPage() {
 }
 
 function SettingsContent() {
-  const role = getRole();
-  const isSuperAdmin = role === "super_admin";
-
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-8">
-      <h1 className="text-2xl font-bold bg-gradient-to-r from-brand to-accent bg-clip-text text-transparent">Settings</h1>
+      <h1 className="text-2xl font-bold bg-gradient-to-r from-brand to-accent bg-clip-text text-transparent">Настройки</h1>
 
-      {isSuperAdmin && <TelegramSection />}
+      {isTelegramWebApp() && <WorkspaceSection />}
+      {isAdminRole() && <TelegramSection />}
+      {isAdminRole() && <AdminSettingsSection />}
       <TagsSection />
+      <TemplatesSection />
+    </div>
+  );
+}
+
+function WorkspaceSection() {
+  const router = useRouter();
+  const [wsName, setWsName] = useState("");
+
+  useEffect(() => {
+    api("/api/staff/me")
+      .then((data: any) => {
+        if (data?.postforge_org_id?.startsWith("personal_")) {
+          setWsName("Личное пространство");
+        } else if (data?.postforge_org_id) {
+          setWsName("Команда");
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  return (
+    <div>
+      <h2 className="text-lg font-semibold flex items-center gap-2 mb-3">
+        <svg className="w-5 h-5 text-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Пространство
+      </h2>
+      <div className="bg-gradient-to-br from-surface-card to-surface border border-surface-border rounded-2xl p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium text-white">{wsName || "..."}</div>
+            <div className="text-xs text-slate-500 mt-0.5">Текущее рабочее пространство CRM</div>
+          </div>
+          <Button variant="ghost" onClick={() => { clearTokens(); router.replace("/login"); }}>
+            Сменить
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -35,6 +78,7 @@ function TelegramSection() {
   const [password2fa, setPassword2fa] = useState("");
   const [step, setStep] = useState<"idle" | "code_sent">("idle");
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState<string | null>(null);
 
   useEffect(() => {
     api("/api/tg/status").then(setAccounts).catch(console.error);
@@ -62,11 +106,20 @@ function TelegramSection() {
   };
 
   const disconnect = async (id: string) => {
-    if (!confirm("Disconnect this account?")) return;
+    if (!confirm("Отключить этот аккаунт?")) return;
     try {
       await api(`/api/tg/disconnect/${id}`, { method: "DELETE" });
       setAccounts((prev) => prev.filter((a) => a.id !== id));
     } catch (e: any) { alert(e.message); }
+  };
+
+  const handleSync = async (id: string) => {
+    setSyncing(id);
+    try {
+      await syncDialogs(id, 100);
+      alert("Синхронизация запущена. Диалоги появятся в течение минуты.");
+    } catch (e: any) { alert(e.message); }
+    setSyncing(null);
   };
 
   return (
@@ -75,20 +128,29 @@ function TelegramSection() {
         <svg className="w-5 h-5 text-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
         </svg>
-        Telegram Accounts
+        Telegram аккаунты
       </h2>
 
       {accounts.map((acc) => (
-        <div key={acc.id} className="flex items-center justify-between bg-gradient-to-r from-surface-card to-surface border border-surface-border rounded-xl p-4 mb-2">
+        <div key={acc.id} className="bg-gradient-to-r from-surface-card to-surface border border-surface-border rounded-xl p-4 mb-2">
           <div className="flex items-center gap-3">
-            <div className={`w-2 h-2 rounded-full ${acc.is_active ? "bg-emerald-400" : "bg-red-400"}`} />
-            <span className="font-medium">{acc.phone}</span>
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${acc.is_active ? "bg-emerald-400" : "bg-red-400"}`} />
+            <span className="font-medium text-sm">{acc.phone}</span>
             <span className={`text-xs ${acc.is_active ? "text-emerald-400/70" : "text-red-400/70"}`}>
-              {acc.is_active ? "Active" : "Disconnected"}
+              {acc.is_active ? "Активен" : "Отключён"}
             </span>
           </div>
           {acc.is_active && (
-            <Button variant="danger" onClick={() => disconnect(acc.id)}>Disconnect</Button>
+            <div className="flex gap-2 mt-3 flex-wrap">
+              <Button
+                variant="secondary"
+                onClick={() => handleSync(acc.id)}
+                disabled={syncing === acc.id}
+              >
+                {syncing === acc.id ? "..." : "Загрузить диалоги"}
+              </Button>
+              <Button variant="danger" onClick={() => disconnect(acc.id)}>Отключить</Button>
+            </div>
           )}
         </div>
       ))}
@@ -96,17 +158,17 @@ function TelegramSection() {
       <div className="mt-4 bg-gradient-to-br from-surface-card to-surface border border-surface-border rounded-2xl p-5 space-y-3">
         {step === "idle" ? (
           <>
-            <Input label="Phone number" value={phone} onChange={setPhone} placeholder="+79001234567" />
+            <Input label="Номер телефона" value={phone} onChange={setPhone} placeholder="+79001234567" />
             <Button onClick={connect} disabled={loading || !phone}>
-              {loading ? "Sending code..." : "Connect Account"}
+              {loading ? "Отправка кода..." : "Подключить аккаунт"}
             </Button>
           </>
         ) : (
           <>
-            <Input label="Code from Telegram" value={code} onChange={setCode} placeholder="12345" />
-            <Input label="2FA Password (if enabled)" type="password" value={password2fa} onChange={setPassword2fa} />
+            <Input label="Код из Telegram" value={code} onChange={setCode} placeholder="12345" />
+            <Input label="2FA пароль (если включен)" type="password" value={password2fa} onChange={setPassword2fa} />
             <Button onClick={verify} disabled={loading || !code}>
-              {loading ? "Verifying..." : "Verify"}
+              {loading ? "Проверка..." : "Подтвердить"}
             </Button>
           </>
         )}
@@ -124,7 +186,7 @@ function TagsSection() {
     api("/api/tags").then(setTags).catch(console.error);
   }, []);
 
-  const createTag = async () => {
+  const handleCreate = async () => {
     if (!name.trim()) return;
     try {
       const tag = await api("/api/tags", {
@@ -143,7 +205,7 @@ function TagsSection() {
           <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
           <line x1="7" y1="7" x2="7.01" y2="7" />
         </svg>
-        Tags
+        Теги
       </h2>
       <div className="flex flex-wrap gap-2 mb-4">
         {tags.map((t) => (
@@ -155,12 +217,12 @@ function TagsSection() {
             {t.name}
           </span>
         ))}
-        {tags.length === 0 && <span className="text-sm text-slate-500">No tags created yet</span>}
+        {tags.length === 0 && <span className="text-sm text-slate-500">Тегов пока нет</span>}
       </div>
       <div className="flex gap-2 items-end">
-        <Input label="Tag name" value={name} onChange={setName} placeholder="VIP" />
+        <Input label="Название тега" value={name} onChange={setName} placeholder="VIP" />
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm text-slate-400 font-medium">Color</label>
+          <label className="text-sm text-slate-400 font-medium">Цвет</label>
           <input
             type="color"
             value={color}
@@ -168,7 +230,206 @@ function TagsSection() {
             className="w-10 h-10 rounded-xl cursor-pointer bg-transparent border border-surface-border"
           />
         </div>
-        <Button onClick={createTag}>Add</Button>
+        <Button onClick={handleCreate}>Добавить</Button>
+      </div>
+    </section>
+  );
+}
+
+function TemplatesSection() {
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [category, setCategory] = useState("");
+  const [shortcut, setShortcut] = useState("");
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [sendAs, setSendAs] = useState("auto");
+
+  useEffect(() => {
+    getTemplates().then(setTemplates).catch(console.error);
+  }, []);
+
+  const handleCreate = async () => {
+    if (!title.trim() || !content.trim()) return;
+    try {
+      let tpl = await createTemplate({
+        title: title.trim(),
+        content: content.trim(),
+        category: category.trim() || undefined,
+        shortcut: shortcut.trim() || undefined,
+      });
+      // Upload media if selected
+      if (mediaFile) {
+        const formData = new FormData();
+        formData.append("file", mediaFile);
+        const mediaResult = await api(`/api/templates/${tpl.id}/upload-media?send_as=${sendAs}`, {
+          method: "POST",
+          body: formData,
+          headers: {},
+        });
+        tpl = { ...tpl, media_path: mediaResult.media_path, media_type: mediaResult.media_type };
+      }
+      setTemplates((prev) => [...prev, tpl]);
+      setTitle(""); setContent(""); setCategory(""); setShortcut("");
+      setMediaFile(null); setSendAs("auto");
+    } catch (e: any) { alert(e.message); }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteTemplate(id);
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+    } catch (e: any) { alert(e.message); }
+  };
+
+  return (
+    <section className="animate-fade-in">
+      <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+        <svg className="w-5 h-5 text-purple-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
+        </svg>
+        Шаблоны ответов
+      </h2>
+
+      <div className="space-y-2 mb-4">
+        {templates.map((tpl) => (
+          <div key={tpl.id} className="bg-surface-card border border-surface-border rounded-xl p-3 flex items-start justify-between gap-3 animate-fade-in">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-medium text-sm text-brand">{tpl.title}</span>
+                {tpl.media_type && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand">
+                    {tpl.media_type === "photo" ? "📷" : tpl.media_type === "video" ? "🎬" : tpl.media_type === "video_note" ? "🔵" : tpl.media_type === "voice" ? "🎤" : "📄"}
+                  </span>
+                )}
+                {tpl.category && <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-hover text-slate-400">{tpl.category}</span>}
+                {tpl.shortcut && <span className="text-[10px] text-slate-500 font-mono">{tpl.shortcut}</span>}
+              </div>
+              <p className="text-xs text-slate-400 break-words">{tpl.content.slice(0, 150)}{tpl.content.length > 150 ? "..." : ""}</p>
+            </div>
+            <button onClick={() => handleDelete(tpl.id)} className="text-slate-600 hover:text-red-400 transition-colors p-1 shrink-0">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          </div>
+        ))}
+        {templates.length === 0 && <span className="text-sm text-slate-500">Шаблонов пока нет</span>}
+      </div>
+
+      <div className="bg-gradient-to-br from-surface-card to-surface border border-surface-border rounded-2xl p-5 space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Название" value={title} onChange={setTitle} placeholder="Приветствие" />
+          <Input label="Категория" value={category} onChange={setCategory} placeholder="Общие" />
+        </div>
+        <div>
+          <label className="text-sm text-slate-400 font-medium block mb-1.5">Текст шаблона</label>
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="Здравствуйте! Чем могу помочь?"
+            rows={3}
+            className="w-full bg-surface border border-surface-border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-brand/50 resize-none"
+          />
+        </div>
+        <Input label="Шорткат (необязательно)" value={shortcut} onChange={setShortcut} placeholder="/hello" />
+
+        {/* Media upload */}
+        <div>
+          <label className="text-sm text-slate-400 font-medium block mb-1.5">Медиа (опционально)</label>
+          <div className="flex flex-wrap gap-2 items-center">
+            <label className="cursor-pointer px-3 py-2 rounded-xl border border-surface-border bg-surface text-sm text-slate-400 hover:border-brand/30 transition-colors">
+              {mediaFile ? mediaFile.name : "📎 Файл"}
+              <input type="file" className="hidden" accept="image/*,video/*,audio/*,.ogg"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) {
+                    setMediaFile(f);
+                    if (f.type.startsWith("image/")) setSendAs("photo");
+                    else if (f.type.startsWith("video/")) setSendAs("video");
+                    else if (f.type.startsWith("audio/")) setSendAs("voice");
+                    else setSendAs("document");
+                  }
+                }}
+              />
+            </label>
+            {mediaFile && (
+              <>
+                <select value={sendAs} onChange={(e) => setSendAs(e.target.value)}
+                  className="px-2 py-2 rounded-xl border border-surface-border bg-surface text-xs text-slate-400 focus:outline-none">
+                  <option value="photo">📷 Фото</option>
+                  <option value="video">🎬 Видео</option>
+                  <option value="video_note">🔵 Кружок</option>
+                  <option value="voice">🎤 Голосовое</option>
+                  <option value="document">📄 Документ</option>
+                </select>
+                <button onClick={() => { setMediaFile(null); setSendAs("auto"); }} className="text-red-400 text-xs hover:text-red-300">✕</button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <Button onClick={handleCreate} disabled={!title.trim() || !content.trim()}>Создать шаблон</Button>
+      </div>
+    </section>
+  );
+}
+
+function AdminSettingsSection() {
+  const [showRealNames, setShowRealNames] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api("/api/settings/crm").then((s: any) => {
+      setShowRealNames(s.show_real_names ?? false);
+    }).catch(console.error);
+  }, []);
+
+  const toggle = async (val: boolean) => {
+    setShowRealNames(val);
+    setSaving(true);
+    try {
+      await api(`/api/settings/crm?show_real_names=${val}`, { method: "PATCH" });
+    } catch (e: any) { alert(e.message); }
+    setSaving(false);
+  };
+
+  return (
+    <section className="animate-fade-in">
+      <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+        <svg className="w-5 h-5 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </svg>
+        Отображение контактов
+      </h2>
+      <div className="flex gap-3">
+        <button
+          onClick={() => toggle(false)}
+          disabled={saving}
+          className={`flex-1 p-4 rounded-xl border transition-all ${
+            !showRealNames
+              ? "bg-brand/10 border-brand/30 text-brand"
+              : "border-surface-border text-slate-400 hover:border-brand/20"
+          }`}
+        >
+          <div className="font-medium text-sm mb-1">Анонимные псевдонимы</div>
+          <div className="text-xs opacity-70">Операторы видят только псевдонимы клиентов</div>
+        </button>
+        <button
+          onClick={() => toggle(true)}
+          disabled={saving}
+          className={`flex-1 p-4 rounded-xl border transition-all ${
+            showRealNames
+              ? "bg-brand/10 border-brand/30 text-brand"
+              : "border-surface-border text-slate-400 hover:border-brand/20"
+          }`}
+        >
+          <div className="font-medium text-sm mb-1">Настоящие имена</div>
+          <div className="text-xs opacity-70">Операторы видят реальные имена из Telegram</div>
+        </button>
       </div>
     </section>
   );

@@ -3,18 +3,25 @@
 import { useEffect, useRef, useState } from "react";
 import {
   api,
+  archiveContact,
+  avatarUrl,
   connectWS,
   createGroup,
+  editMessage,
   forwardMessages,
   getRole,
+  getTemplates,
   mediaUrl,
   onWSEvent,
   parseInlineButtons,
   pressInlineButton,
+  translateText,
+  unarchiveContact,
   uploadMedia,
   type Contact,
   type Message,
   type Tag,
+  type Template,
   type TgAccount,
 } from "@/lib";
 import { AppShell, AuthGuard, Badge, Button } from "@/components";
@@ -78,6 +85,41 @@ function ChatsContent() {
   // Fullscreen photo viewer
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
+  // Archive filter
+  const [showArchived, setShowArchived] = useState(false);
+
+  // Templates
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [showTemplates, setShowTemplates] = useState(false);
+
+  // Tag filter
+  const [filterTag, setFilterTag] = useState<string | null>(null);
+
+  // Emoji picker
+  const [showEmoji, setShowEmoji] = useState(false);
+
+  // Translation
+  const [translating, setTranslating] = useState<string | null>(null);
+  const [translations, setTranslations] = useState<Map<string, string>>(new Map());
+  const [translateLangIn, setTranslateLangIn] = useState("ru");
+  const [translateLangOut, setTranslateLangOut] = useState("en");
+  const [translatingInput, setTranslatingInput] = useState(false);
+
+  // Edit message
+  const [editingMsg, setEditingMsg] = useState<Message | null>(null);
+  const [editText, setEditText] = useState("");
+
+  // Forum topics
+  const [topics, setTopics] = useState<{ id: number; name: string }[]>([]);
+  const [activeTopic, setActiveTopic] = useState<number | null>(null);
+  const [loadingTopic, setLoadingTopic] = useState(false);
+
+  // Avatar cache
+  const [avatarErrors, setAvatarErrors] = useState<Set<string>>(new Set());
+
+  // Sending state (prevent freeze)
+  const [sending, setSending] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<Contact | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -91,6 +133,7 @@ function ChatsContent() {
   }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { api("/api/tags").then(setAllTags).catch(console.error); }, []);
+  useEffect(() => { getTemplates().then(setTemplates).catch(console.error); }, []);
 
   useEffect(() => {
     api("/api/contacts?status=approved").then((data: Contact[]) =>
@@ -101,11 +144,19 @@ function ChatsContent() {
     const unsub = onWSEvent((event) => {
       if (event.type === "new_message") {
         const isCurrentChat = selectedRef.current?.id === event.contact_id;
-        setContacts((prev) =>
-          prev
+        setContacts((prev) => {
+          const exists = prev.some((c) => c.id === event.contact_id);
+          if (!exists) {
+            // New contact — fetch full contact list to get the new one
+            api("/api/contacts?status=approved").then((data: Contact[]) =>
+              setContacts(data.sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || "")))
+            ).catch(console.error);
+            return prev;
+          }
+          return prev
             .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString() } : c)
-            .sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || ""))
-        );
+            .sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || ""));
+        });
         if (isCurrentChat) {
           setMessages((prev) => {
             if (prev.some((m) => m.id === event.message.id)) return prev;
@@ -144,6 +195,12 @@ function ChatsContent() {
           prev.map((m) => m.id === event.message_id ? { ...m, is_deleted: true } : m)
         );
       }
+      if (event.type === "messages_read") {
+        const readIds = new Set(event.message_ids as string[]);
+        setMessages((prev) =>
+          prev.map((m) => readIds.has(m.id) ? { ...m, is_read: true } : m)
+        );
+      }
       if (event.type === "contact_deleted") {
         setContacts((prev) => prev.filter((c) => c.id !== event.contact_id));
       }
@@ -154,19 +211,39 @@ function ChatsContent() {
 
   useEffect(() => {
     if (!selected) return;
-    api(`/api/messages/${selected.id}`).then(setMessages).catch(console.error);
+    setActiveTopic(null);
+    setTopics([]);
+    api(`/api/messages/${selected.id}?limit=100`).then((msgs: Message[]) => {
+      setMessages(msgs);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView(), 50);
+    }).catch(console.error);
+    // Load topics for forum supergroups
+    if (selected.is_forum) {
+      api(`/api/messages/${selected.id}/topics`).then(setTopics).catch(console.error);
+    }
     setReplyTo(null);
     setForwardMode(false);
     setForwardSelected(new Set());
-    // Clear unread for this chat — persist to DB
     setUnread((prev) => { const n = new Map(prev); n.delete(selected.id); return n; });
     api(`/api/messages/${selected.id}/read`, { method: "PATCH" }).catch(console.error);
   }, [selected]);
 
+  // Reload messages when topic filter changes
   useEffect(() => {
     if (!selected) return;
+    setLoadingTopic(true);
+    const topicParam = activeTopic !== null ? `&topic_id=${activeTopic}` : "";
+    api(`/api/messages/${selected.id}?limit=100${topicParam}`).then((msgs: Message[]) => {
+      setMessages(msgs);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView(), 50);
+    }).catch(console.error).finally(() => setLoadingTopic(false));
+  }, [activeTopic]);
+
+  useEffect(() => {
+    if (!selected) return;
+    const topicParam = activeTopic !== null ? `&topic_id=${activeTopic}` : "";
     const interval = setInterval(() => {
-      api(`/api/messages/${selected.id}`).then((msgs: Message[]) => {
+      api(`/api/messages/${selected.id}?limit=100${topicParam}`).then((msgs: Message[]) => {
         setMessages((prev) => {
           if (msgs.length !== prev.length || JSON.stringify(msgs.map(m => m.is_deleted)) !== JSON.stringify(prev.map(m => m.is_deleted))) return msgs;
           return prev;
@@ -174,7 +251,7 @@ function ChatsContent() {
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(interval);
-  }, [selected]);
+  }, [selected, activeTopic]);
 
   const justOpenedChat = useRef(false);
 
@@ -192,8 +269,8 @@ function ChatsContent() {
       messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
       return;
     }
-    // Auto-scroll only if user is near the bottom (within 150px)
-    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+    // Auto-scroll only if user is near the bottom (within 300px)
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
     if (isNearBottom) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
@@ -211,13 +288,29 @@ function ChatsContent() {
     const content = text.trim();
     if (!content || !selected || sendingRef.current) return;
     sendingRef.current = true;
+
+    // Check for shortcut match
+    const matchedTpl = checkShortcut(content);
+    if (matchedTpl) {
+      setText("");
+      if (inputRef.current) inputRef.current.style.height = "auto";
+      await applyTemplate(matchedTpl);
+      sendingRef.current = false;
+      return;
+    }
+
     // Clear input immediately for snappy UX
+    const savedText = content;
+    const savedReply = replyTo;
     setText("");
     setReplyTo(null);
+    setShowEmoji(false);
+    setShowTemplates(false);
     if (inputRef.current) inputRef.current.style.height = "auto";
+    setSending(true);
     try {
-      const body: any = { content };
-      if (replyTo) body.reply_to_msg_id = replyTo.id;
+      const body: any = { content: savedText };
+      if (savedReply) body.reply_to_msg_id = savedReply.id;
 
       const msg = await api(`/api/messages/${selected.id}/send`, {
         method: "POST",
@@ -227,17 +320,88 @@ function ChatsContent() {
         if (prev.some((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
       });
-    } catch (e: any) { alert(e.message); } finally { sendingRef.current = false; }
+    } catch (e: any) {
+      // Restore text on failure
+      setText(savedText);
+      alert(e.message);
+    } finally { sendingRef.current = false; }
+  };
+
+  // Apply template: set text and send media if template has it
+  const applyTemplate = async (tpl: Template) => {
+    setShowTemplates(false);
+    if (tpl.media_path && tpl.media_type && selected) {
+      // Send media from template via backend
+      sendingRef.current = true;
+      try {
+        const msg = await api(`/api/messages/${selected.id}/send-template-media?template_id=${tpl.id}`, {
+          method: "POST",
+        });
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      } catch (e: any) { alert(e.message); }
+      sendingRef.current = false;
+    } else {
+      setText(tpl.content);
+      inputRef.current?.focus();
+    }
+  };
+
+  // Shortcut detection: when user types /shortcut and presses Enter
+  const checkShortcut = (inputText: string): Template | undefined => {
+    if (!inputText.startsWith("/")) return undefined;
+    return templates.find((t) => t.shortcut === inputText.trim());
+  };
+
+  const handleArchive = async (contactId: string) => {
+    try {
+      const contact = contacts.find((c) => c.id === contactId);
+      if (!contact) return;
+      if (contact.is_archived) {
+        await unarchiveContact(contactId);
+      } else {
+        await archiveContact(contactId);
+      }
+      setContacts((prev) => prev.map((c) => c.id === contactId ? { ...c, is_archived: !c.is_archived } : c));
+      if (selected?.id === contactId) {
+        setSelected(null);
+        setMessages([]);
+      }
+    } catch (e: any) { alert(e.message); }
+  };
+
+  const handleTranslate = async (msgId: string, text: string, direction: string) => {
+    setTranslating(msgId);
+    try {
+      const lang = direction === "incoming" ? translateLangIn : translateLangOut;
+      const result = await translateText(text, lang);
+      setTranslations((prev) => new Map(prev).set(msgId, result.translated));
+    } catch (e: any) { alert(e.message); }
+    setTranslating(null);
+  };
+
+  const handleEditMessage = async () => {
+    if (!editingMsg || !selected || !editText.trim()) return;
+    try {
+      await editMessage(selected.id, editingMsg.id, editText.trim());
+      setMessages((prev) => prev.map((m) => m.id === editingMsg.id ? { ...m, content: editText.trim(), is_edited: true } : m));
+      setEditingMsg(null);
+      setEditText("");
+    } catch (e: any) { alert(e.message); }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !selected) return;
+    if (!file || !selected || sending) return;
+    setSending(true);
     try {
       const msg = await uploadMedia(selected.id, file, text.trim() || undefined);
       setMessages((prev) => [...prev, msg]);
       setText("");
     } catch (err: any) { alert(err.message); }
+    setSending(false);
     e.target.value = "";
   };
 
@@ -332,7 +496,15 @@ function ChatsContent() {
   };
 
   const filteredContacts = contacts
-    .filter((c) => c.alias.toLowerCase().includes(search.toLowerCase()))
+    .filter((c) => {
+      // Archive filter
+      if (showArchived ? !c.is_archived : c.is_archived) return false;
+      // Search filter
+      if (search && !c.alias.toLowerCase().includes(search.toLowerCase())) return false;
+      // Tag filter
+      if (filterTag && !c.tags.includes(filterTag)) return false;
+      return true;
+    })
     .sort((a, b) => {
       const ap = pinned.has(a.id) ? 1 : 0;
       const bp = pinned.has(b.id) ? 1 : 0;
@@ -369,12 +541,42 @@ function ChatsContent() {
                   }).catch(console.error);
                 }}
                 className="w-10 h-10 flex items-center justify-center bg-brand/10 border border-brand/20 text-brand rounded-xl hover:bg-brand/20 transition-all shrink-0"
-                title="Create group"
+                title="Создать группу"
               >
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
               </button>
+            )}
+          </div>
+          {/* Filter bar: archive toggle + tag filter */}
+          <div className="flex items-center gap-1.5 px-4 pt-1 pb-2 flex-wrap">
+            <button
+              onClick={() => setShowArchived(!showArchived)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-all ${
+                showArchived
+                  ? "bg-brand/10 border-brand/30 text-brand"
+                  : "border-surface-border text-slate-500 hover:text-brand"
+              }`}
+            >
+              {showArchived ? "◀ Чаты" : "Архив"}
+            </button>
+            {allTags.map((tag) => (
+              <button
+                key={tag.id}
+                onClick={() => setFilterTag(filterTag === tag.name ? null : tag.name)}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-medium border transition-all ${
+                  filterTag === tag.name
+                    ? "border-transparent shadow-sm"
+                    : "border-surface-border opacity-50 hover:opacity-80"
+                }`}
+                style={{ backgroundColor: tag.color + "25", color: tag.color, borderColor: filterTag === tag.name ? tag.color + "40" : undefined }}
+              >
+                {tag.name}
+              </button>
+            ))}
+            {filterTag && (
+              <button onClick={() => setFilterTag(null)} className="text-[10px] text-slate-500 hover:text-white">✕</button>
             )}
           </div>
         </div>
@@ -391,14 +593,27 @@ function ChatsContent() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
-                  {/* Group/channel icon */}
-                  {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") && (
-                    <svg className="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                      <circle cx="9" cy="7" r="4" />
-                      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                    </svg>
+                  {/* Avatar */}
+                  {!avatarErrors.has(c.id) ? (
+                    <img
+                      src={avatarUrl(c.id)}
+                      alt=""
+                      className="w-8 h-8 rounded-full object-cover shrink-0 bg-surface-card"
+                      onError={() => setAvatarErrors((prev) => new Set(prev).add(c.id))}
+                    />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-surface-card border border-surface-border flex items-center justify-center shrink-0">
+                      {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") ? (
+                        <svg className="w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                          <circle cx="9" cy="7" r="4" />
+                          <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                        </svg>
+                      ) : (
+                        <span className="text-xs text-slate-400 font-medium">{c.alias.charAt(0).toUpperCase()}</span>
+                      )}
+                    </div>
                   )}
                   <span className={`font-medium text-sm truncate ${unread.has(c.id) ? "text-white" : ""}`}>{c.alias}</span>
                   {unread.has(c.id) && (
@@ -422,11 +637,20 @@ function ChatsContent() {
                         <path d="M12 17v5" /><path d="M9 2h6l-1 7h4l-7 8 1-5H8l1-10z" />
                       </svg>
                     </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleArchive(c.id); }}
+                    className="text-slate-600 hover:text-amber-400 transition-colors p-1"
+                    title={c.is_archived ? "Разархивировать" : "Архивировать"}
+                  >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={c.is_archived ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" />
+                    </svg>
+                  </button>
                   {isAdmin && (
                     <button
                       onClick={(e) => { e.stopPropagation(); deleteContact(c.id); }}
                       className="text-slate-600 hover:text-red-400 transition-colors p-1 -mr-1"
-                      title="Delete from CRM"
+                      title="Удалить из CRM"
                     >
                       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -491,12 +715,19 @@ function ChatsContent() {
                         <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
                       </svg>
                     )}
-                    <div
-                      className="font-semibold cursor-pointer hover:text-brand transition-colors truncate"
-                      onClick={() => { setAliasValue(selected.alias); setEditingAlias(true); }}
-                      title="Click to rename"
-                    >
-                      {selected.alias}
+                    <div>
+                      <div
+                        className="font-semibold cursor-pointer hover:text-brand transition-colors truncate"
+                        onClick={() => { setAliasValue(selected.alias); setEditingAlias(true); }}
+                        title="Click to rename"
+                      >
+                        {selected.alias}
+                      </div>
+                      {selected.chat_type !== "private" && (
+                        <div className="text-[10px] text-slate-500">
+                          {selected.chat_type === "supergroup" ? (selected.is_forum ? "Форум" : "Супергруппа") : selected.chat_type === "channel" ? "Канал" : "Группа"}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -561,6 +792,46 @@ function ChatsContent() {
                 </button>
               )}
 
+              {/* Translation language selectors — incoming & outgoing */}
+              <select
+                value={translateLangIn}
+                onChange={(e) => setTranslateLangIn(e.target.value)}
+                className="px-2 py-1.5 rounded-xl border border-surface-border bg-surface-card text-xs text-slate-400 focus:outline-none focus:border-brand/30 cursor-pointer"
+                title="Перевод входящих"
+              >
+                <option value="ru">📥 RU</option>
+                <option value="en">📥 EN</option>
+                <option value="es">📥 ES</option>
+                <option value="de">📥 DE</option>
+                <option value="fr">📥 FR</option>
+                <option value="zh">📥 ZH</option>
+                <option value="ar">📥 AR</option>
+                <option value="pt">📥 PT</option>
+                <option value="ja">📥 JA</option>
+                <option value="ko">📥 KO</option>
+                <option value="uk">📥 UK</option>
+                <option value="tr">📥 TR</option>
+              </select>
+              <select
+                value={translateLangOut}
+                onChange={(e) => setTranslateLangOut(e.target.value)}
+                className="px-2 py-1.5 rounded-xl border border-surface-border bg-surface-card text-xs text-slate-400 focus:outline-none focus:border-brand/30 cursor-pointer"
+                title="Перевод исходящих"
+              >
+                <option value="en">📤 EN</option>
+                <option value="ru">📤 RU</option>
+                <option value="es">📤 ES</option>
+                <option value="de">📤 DE</option>
+                <option value="fr">📤 FR</option>
+                <option value="zh">📤 ZH</option>
+                <option value="ar">📤 AR</option>
+                <option value="pt">📤 PT</option>
+                <option value="ja">📤 JA</option>
+                <option value="ko">📤 KO</option>
+                <option value="uk">📤 UK</option>
+                <option value="tr">📤 TR</option>
+              </select>
+
               {/* Forward mode toggle */}
               <button
                 onClick={() => { setForwardMode(!forwardMode); setForwardSelected(new Set()); }}
@@ -623,6 +894,35 @@ function ChatsContent() {
               </div>
             )}
 
+            {/* Forum topic tabs */}
+            {selected.is_forum && topics.length > 0 && (
+              <div className="px-4 py-2 border-b border-surface-border/50 flex gap-1.5 overflow-x-auto flex-nowrap shrink-0">
+                <button
+                  onClick={() => setActiveTopic(null)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border whitespace-nowrap transition-all ${
+                    activeTopic === null
+                      ? "bg-purple-500/20 border-purple-500/40 text-purple-400"
+                      : "border-surface-border text-slate-400 hover:border-slate-500"
+                  }`}
+                >
+                  Все топики
+                </button>
+                {topics.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setActiveTopic(t.id)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border whitespace-nowrap transition-all ${
+                      activeTopic === t.id
+                        ? "bg-purple-500/20 border-purple-500/40 text-purple-400"
+                        : "border-surface-border text-slate-400 hover:border-slate-500"
+                    }`}
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Messages */}
             <div
               ref={messagesContainerRef}
@@ -632,6 +932,12 @@ function ChatsContent() {
                 setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 300);
               }}
             >
+              {loadingTopic && (
+                <div className="flex items-center justify-center py-8">
+                  <div className="w-6 h-6 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+                  <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
+                </div>
+              )}
               {messages.map((m) => {
                 const buttons = parseInlineButtons(m.inline_buttons);
                 return (
@@ -653,12 +959,12 @@ function ChatsContent() {
                       onDoubleClick={() => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }}
                     >
                       {/* Topic badge for forum supergroups */}
-                      {m.topic_id && m.topic_id !== 1 && (
+                      {m.topic_id && (
                         <div className="text-[10px] text-purple-400 font-medium mb-0.5 ml-1 flex items-center gap-1">
                           <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                             <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
                           </svg>
-                          {m.topic_name || `Topic #${m.topic_id}`}
+                          {m.topic_name || (m.topic_id === 1 ? "General" : `Topic #${m.topic_id}`)}
                         </div>
                       )}
                       {/* Sender alias for group messages */}
@@ -670,6 +976,8 @@ function ChatsContent() {
                         id={`msg-${m.id}`}
                         className={`px-3.5 py-2.5 rounded-2xl text-sm overflow-hidden break-words ${
                           m.is_deleted ? "opacity-50" : ""
+                        } ${
+                          m.is_edited && !m.is_deleted ? "ring-1 ring-amber-400/30" : ""
                         } ${
                           m.direction === "outgoing"
                             ? "bg-gradient-to-br from-brand to-brand-dark text-white rounded-br-md shadow-[0_2px_8px_rgba(14,165,233,0.2)]"
@@ -705,6 +1013,17 @@ function ChatsContent() {
                             }}
                           >
                             {m.reply_to_content_preview}
+                          </div>
+                        )}
+
+                        {/* Forwarded label */}
+                        {m.forwarded_from_alias && (
+                          <div className={`flex items-center gap-1.5 mb-1 text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>
+                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="15 17 20 12 15 7" />
+                              <path d="M4 18v-2a4 4 0 014-4h12" />
+                            </svg>
+                            Переслано от {m.forwarded_from_alias}
                           </div>
                         )}
 
@@ -761,9 +1080,62 @@ function ChatsContent() {
                         {/* Content */}
                         {m.content && <span className={`break-words whitespace-pre-wrap [overflow-wrap:anywhere] ${m.is_deleted ? "line-through" : ""}`}>{m.content}</span>}
 
-                        {/* Timestamp + edited + read status */}
+                        {/* Translation */}
+                        {translations.has(m.id) && (
+                          <div className={`mt-1.5 pt-1.5 border-t text-xs italic ${m.direction === "outgoing" ? "border-white/20 text-white/60" : "border-surface-border text-slate-400"}`}>
+                            🌐 {translations.get(m.id)}
+                          </div>
+                        )}
+
+                        {/* Timestamp + edited + read status + actions */}
                         <div className={`flex items-center justify-end gap-1 text-[10px] mt-1 ${m.direction === "outgoing" ? "text-white/40" : "text-slate-500"}`}>
-                          {m.is_edited && <span className="italic mr-1">edited</span>}
+                          {/* Translate button */}
+                          {m.content && !translations.has(m.id) && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleTranslate(m.id, m.content!, m.direction); }}
+                              className={`hover:text-brand transition-colors ${translating === m.id ? "animate-pulse" : ""}`}
+                              title="Перевести"
+                            >
+                              🌐
+                            </button>
+                          )}
+                          {translations.has(m.id) && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setTranslations((prev) => { const n = new Map(prev); n.delete(m.id); return n; }); }}
+                              className="hover:text-brand transition-colors"
+                              title="Скрыть перевод"
+                            >
+                              ✕
+                            </button>
+                          )}
+                          {/* Edit button (outgoing only) */}
+                          {m.direction === "outgoing" && m.content && !m.is_deleted && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setEditingMsg(m); setEditText(m.content || ""); }}
+                              className="hover:text-brand transition-colors"
+                              title="Редактировать"
+                            >
+                              ✏️
+                            </button>
+                          )}
+                          {/* Delete button (outgoing only) */}
+                          {m.direction === "outgoing" && !m.is_deleted && (
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (!confirm("Удалить сообщение?")) return;
+                                try {
+                                  await api(`/api/messages/${selected!.id}/delete/${m.id}`, { method: "DELETE" });
+                                  setMessages((prev) => prev.map((msg) => msg.id === m.id ? { ...msg, is_deleted: true, content: "" } : msg));
+                                } catch {}
+                              }}
+                              className="hover:text-red-400 transition-colors"
+                              title="Удалить"
+                            >
+                              🗑
+                            </button>
+                          )}
+                          {m.is_edited && <span className="italic mr-1 text-amber-400/70">изм.</span>}
                           {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           {m.direction === "outgoing" && (
                             <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -845,9 +1217,73 @@ function ChatsContent() {
               </div>
             )}
 
+            {/* Edit message bar */}
+            {editingMsg && (
+              <div className="px-4 py-2 bg-amber-500/5 border-t border-amber-500/20 flex items-center gap-3 animate-slide-up">
+                <div className="w-1 h-8 bg-amber-500 rounded-full shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <input
+                    value={editText}
+                    onChange={(e) => setEditText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleEditMessage(); if (e.key === "Escape") setEditingMsg(null); }}
+                    className="w-full bg-transparent text-sm focus:outline-none"
+                    autoFocus
+                  />
+                </div>
+                <button onClick={handleEditMessage} className="text-amber-400 text-xs font-medium hover:text-amber-300">Сохранить</button>
+                <button onClick={() => setEditingMsg(null)} className="text-slate-500 hover:text-white p-1">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            {/* Template picker popup */}
+            {showTemplates && templates.length > 0 && (
+              <div className="px-4 py-2 border-t border-surface-border bg-surface-card/50 max-h-40 overflow-auto animate-slide-up">
+                <div className="text-[10px] text-slate-500 mb-1.5 font-medium">Шаблоны {text.startsWith("/") && <span className="text-brand">— введите шорткат и Enter</span>}</div>
+                <div className="space-y-1">
+                  {templates.filter((tpl) => {
+                    if (!text.startsWith("/")) return true;
+                    const q = text.toLowerCase();
+                    return (tpl.shortcut && tpl.shortcut.toLowerCase().startsWith(q)) || tpl.title.toLowerCase().includes(q.slice(1));
+                  }).map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      onClick={() => applyTemplate(tpl)}
+                      className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-surface-hover transition-colors border border-transparent hover:border-surface-border"
+                    >
+                      <span className="text-brand font-medium">{tpl.title}</span>
+                      {tpl.media_type && <span className="ml-1">{tpl.media_type === "photo" ? "📷" : tpl.media_type === "video" ? "🎬" : tpl.media_type === "video_note" ? "🔵" : tpl.media_type === "voice" ? "🎤" : "📄"}</span>}
+                      {tpl.shortcut && <span className="text-slate-600 ml-1 font-mono">{tpl.shortcut}</span>}
+                      <span className="text-slate-500 ml-2 truncate">{tpl.content.slice(0, 50)}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Emoji picker popup */}
+            {showEmoji && (
+              <div className="px-4 py-2 border-t border-surface-border bg-surface-card/50 animate-slide-up">
+                <div className="flex flex-wrap gap-1 max-h-32 overflow-auto">
+                  {["😀","😂","🤣","😊","😍","🥰","😘","😎","🤔","😢","😭","😡","🔥","❤️","👍","👎","👏","🙏","💪","🎉","✅","❌","⭐","💯","🚀","💬","📌","📎","🔗","📸","🎵","💡","⚡","🌟","💎","🏆","🤝","👀","🙂","😅","🤩","😇","🤗","😋","🤭","🥺","😏","🙄","😴","🤑","🤠","👋","✌️","🤞","👌","💀","🫡","😈","💩"].map((e) => (
+                    <button
+                      key={e}
+                      onClick={() => { setText((prev) => prev + e); inputRef.current?.focus(); }}
+                      className="w-8 h-8 flex items-center justify-center text-lg hover:bg-surface-hover rounded-lg transition-colors"
+                    >
+                      {e}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Input */}
             <div className="p-3 border-t border-surface-border bg-surface-card/30 backdrop-blur-sm">
-              <div className="flex gap-2 items-center bg-surface-card border border-surface-border rounded-2xl px-2">
+              <div className="flex gap-1 items-center bg-surface-card border border-surface-border rounded-2xl px-1">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -857,24 +1293,52 @@ function ChatsContent() {
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="text-slate-500 hover:text-brand transition-colors p-2"
-                  title="Attach file"
+                  className="text-slate-500 hover:text-brand transition-colors p-2 shrink-0"
+                  title="Прикрепить файл"
                 >
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                   </svg>
                 </button>
+                <button
+                  onClick={() => { setShowEmoji(!showEmoji); setShowTemplates(false); }}
+                  className={`p-2 transition-colors shrink-0 ${showEmoji ? "text-brand" : "text-slate-500 hover:text-brand"}`}
+                  title="Эмоджи"
+                >
+                  <span className="text-lg leading-none">😊</span>
+                </button>
+                <button
+                  onClick={() => { setShowTemplates(!showTemplates); setShowEmoji(false); }}
+                  className={`p-2 transition-colors shrink-0 ${showTemplates ? "text-brand" : "text-slate-500 hover:text-brand"}`}
+                  title="Шаблоны"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
+                  </svg>
+                </button>
                 <textarea
                   ref={inputRef}
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setText(val);
+                    // Auto-show templates when typing /
+                    if (val.startsWith("/") && val.length >= 1) {
+                      setShowTemplates(true);
+                      setShowEmoji(false);
+                    } else if (showTemplates && !val.startsWith("/")) {
+                      setShowTemplates(false);
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
                       sendMessage();
                     }
                   }}
-                  placeholder="Type a message..."
+                  placeholder="Введите сообщение..."
                   rows={1}
                   className="flex-1 bg-transparent py-3 text-sm focus:outline-none placeholder:text-slate-600 resize-none max-h-32 overflow-y-auto"
                   style={{ height: "auto" }}
@@ -885,9 +1349,28 @@ function ChatsContent() {
                   }}
                 />
                 <button
+                  onClick={async () => {
+                    if (!text.trim()) return;
+                    setTranslatingInput(true);
+                    try {
+                      const result = await translateText(text, translateLangOut);
+                      setText(result.translated);
+                    } catch (e: any) { alert(e.message); }
+                    setTranslatingInput(false);
+                  }}
+                  disabled={!text.trim() || translatingInput}
+                  className={`text-slate-500 hover:text-brand disabled:text-slate-600 transition-colors p-2 shrink-0 ${translatingInput ? "animate-pulse" : ""}`}
+                  title={`Перевести на ${translateLangOut.toUpperCase()}`}
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M5 8l6 6" /><path d="M4 14l6-6 2-3" /><path d="M2 5h12" /><path d="M7 2h1" />
+                    <path d="M22 22l-5-10-5 10" /><path d="M14 18h6" />
+                  </svg>
+                </button>
+                <button
                   onClick={sendMessage}
-                  disabled={!text.trim()}
-                  className="text-brand hover:text-brand-light disabled:text-slate-600 transition-colors p-2"
+                  disabled={!text.trim() || sending}
+                  className={`text-brand hover:text-brand-light disabled:text-slate-600 transition-colors p-2 shrink-0 ${sending ? "animate-pulse" : ""}`}
                 >
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />

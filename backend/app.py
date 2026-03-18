@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
+from sqlalchemy import delete as sa_delete, func, select, text as sa_text, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import (
@@ -25,10 +25,15 @@ from auth import (
 from bot import get_bot_username, start_bot_polling, stop_bot
 from config import settings
 from crypto import decrypt
-from models import AuditLog, Base, BotInvite, Contact, Message, PinnedChat, Staff, StaffTgAccount, Tag, TgAccount, engine
+from models import (
+    AuditLog, Base, BotInvite, Broadcast, BroadcastRecipient, Contact,
+    Message, MessageTemplate, PinnedChat, Staff, StaffTgAccount, Tag, TgAccount, async_session, engine,
+)
 from schemas import (
     BotInviteCreate,
     BotInviteOut,
+    BroadcastCreate,
+    BroadcastOut,
     ContactOut,
     ContactReveal,
     ContactUpdate,
@@ -38,15 +43,23 @@ from schemas import (
     PressButton,
     RefreshRequest,
     SendMessage,
+    SsoAuthRequest,
     TgAuthRequest,
+    TgAuthResponse,
+    TgWorkspaceItem,
+    TgWorkspaceSelect,
     StaffOut,
     StaffUpdate,
     TagCreate,
     TagOut,
+    TemplateCreate,
+    TemplateOut,
+    TemplateUpdate,
     TgAccountOut,
     TgConnectRequest,
     TgVerifyRequest,
     TokenResponse,
+    TranslateRequest,
 )
 from telegram import (
     create_group,
@@ -68,8 +81,8 @@ app = FastAPI(title="YappiGram", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -84,6 +97,16 @@ AdminUser = Annotated[Staff, Depends(require_role("super_admin", "admin"))]
 SuperAdmin = Annotated[Staff, Depends(require_role("super_admin"))]
 
 
+def _org_id(user: Staff) -> str | None:
+    """Get the effective org_id for data scoping."""
+    return user.postforge_org_id
+
+
+def _org_accounts_subq(user: Staff):
+    """Subquery: TgAccount IDs belonging to user's org."""
+    return select(TgAccount.id).where(TgAccount.org_id == _org_id(user))
+
+
 # ============================================================
 # Startup / Shutdown
 # ============================================================
@@ -92,8 +115,76 @@ SuperAdmin = Annotated[Staff, Depends(require_role("super_admin"))]
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add new columns to existing tables (idempotent)
+        await conn.execute(
+            sa_text("""
+            DO $$ BEGIN
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS postforge_user_id VARCHAR;
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS postforge_org_id VARCHAR;
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS signature_mode VARCHAR DEFAULT 'named';
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS real_tg_id BIGINT;
+                CREATE INDEX IF NOT EXISTS ix_staff_real_tg_id ON staff (real_tg_id);
+                ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT false;
+                ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS max_recipients INTEGER;
+                ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS contact_ids UUID[] DEFAULT '{}';
+                -- org_id columns for multi-tenancy
+                ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS org_id VARCHAR;
+                ALTER TABLE tags ADD COLUMN IF NOT EXISTS org_id VARCHAR;
+                ALTER TABLE message_templates ADD COLUMN IF NOT EXISTS org_id VARCHAR;
+                ALTER TABLE message_templates ADD COLUMN IF NOT EXISTS media_path VARCHAR;
+                ALTER TABLE message_templates ADD COLUMN IF NOT EXISTS media_type VARCHAR;
+                ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS org_id VARCHAR;
+                -- Indexes
+                CREATE INDEX IF NOT EXISTS ix_staff_postforge_org_id ON staff (postforge_org_id);
+                CREATE INDEX IF NOT EXISTS ix_tg_accounts_org_id ON tg_accounts (org_id);
+                CREATE INDEX IF NOT EXISTS ix_tags_org_id ON tags (org_id);
+                CREATE INDEX IF NOT EXISTS ix_message_templates_org_id ON message_templates (org_id);
+                CREATE INDEX IF NOT EXISTS ix_broadcasts_org_id ON broadcasts (org_id);
+            EXCEPTION WHEN OTHERS THEN NULL;
+            END $$;
+            """)
+        )
+        # Change Staff unique constraint: (postforge_user_id, postforge_org_id) instead of postforge_user_id alone
+        await conn.execute(
+            sa_text("""
+            DO $$ BEGIN
+                ALTER TABLE staff DROP CONSTRAINT IF EXISTS staff_postforge_user_id_key;
+            EXCEPTION WHEN OTHERS THEN NULL;
+            END $$;
+            """)
+        )
+        await conn.execute(
+            sa_text("""
+            DO $$ BEGIN
+                ALTER TABLE staff ADD CONSTRAINT uq_staff_pf_user_org UNIQUE (postforge_user_id, postforge_org_id);
+            EXCEPTION WHEN duplicate_table THEN NULL;
+            WHEN duplicate_object THEN NULL;
+            END $$;
+            """)
+        )
+        # Backfill org_id on existing data
+        await conn.execute(sa_text("""
+            UPDATE tg_accounts SET org_id = (
+                SELECT s.postforge_org_id FROM staff s
+                JOIN staff_tg_accounts sta ON sta.staff_id = s.id
+                WHERE sta.tg_account_id = tg_accounts.id
+                LIMIT 1
+            ) WHERE org_id IS NULL
+        """))
+        await conn.execute(sa_text(
+            "UPDATE tags SET org_id = (SELECT postforge_org_id FROM staff WHERE id = tags.created_by) WHERE org_id IS NULL AND created_by IS NOT NULL"
+        ))
+        await conn.execute(sa_text(
+            "UPDATE message_templates SET org_id = (SELECT postforge_org_id FROM staff WHERE id = message_templates.created_by) WHERE org_id IS NULL AND created_by IS NOT NULL"
+        ))
+        await conn.execute(sa_text(
+            "UPDATE broadcasts SET org_id = (SELECT postforge_org_id FROM staff WHERE id = broadcasts.created_by) WHERE org_id IS NULL AND created_by IS NOT NULL"
+        ))
     await startup_listeners()
     asyncio.create_task(start_bot_polling())
+    # Auto-sync dialogs for all connected accounts on startup
+    asyncio.create_task(_auto_sync_on_startup())
 
 
 @app.on_event("shutdown")
@@ -106,36 +197,183 @@ async def on_shutdown():
 # Auth (Telegram-only)
 # ============================================================
 
-@app.post("/api/auth/tg", response_model=TokenResponse)
+@app.post("/api/auth/tg")
 async def tg_auth(req: TgAuthRequest, db: DB):
     """Authenticate via Telegram Mini App initData.
 
-    Auto-creates super_admin for TG_ADMIN_CHAT_ID on first access.
+    Returns tokens directly if user has one workspace,
+    or a list of workspaces to choose from if multiple.
     """
     tg_user = validate_tg_init_data(req.init_data)
     tg_id = tg_user.get("id")
     if not tg_id:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No user ID in initData")
 
+    # 1. Find staff by exact tg_user_id (legacy non-SSO staff)
     result = await db.execute(
         select(Staff).where(Staff.tg_user_id == tg_id, Staff.is_active.is_(True))
     )
-    user = result.scalar_one_or_none()
+    legacy_user = result.scalar_one_or_none()
 
-    # Auto-create super_admin for the configured admin chat ID
-    if not user and tg_id == settings.TG_ADMIN_CHAT_ID:
+    # 2. Find all staff with this real_tg_id (SSO-created staff with linked TG)
+    result = await db.execute(
+        select(Staff).where(Staff.real_tg_id == tg_id, Staff.is_active.is_(True))
+    )
+    sso_staff = list(result.scalars().all())
+
+    # Merge: legacy + SSO (deduplicate by id)
+    all_staff = []
+    seen_ids = set()
+    for s in ([legacy_user] if legacy_user else []) + sso_staff:
+        if s and s.id not in seen_ids:
+            all_staff.append(s)
+            seen_ids.add(s.id)
+
+    # 3. If no staff found, look up PostForge user by TG ID and link/create staff
+    if not all_staff and settings.POSTFORGE_API_URL:
+        import httpx, hashlib
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{settings.POSTFORGE_API_URL}/api/users/by-telegram/{tg_id}",
+                )
+            if resp.status_code == 200:
+                pf_data = resp.json()
+                pf_user_id = str(pf_data.get("id"))
+                pf_nickname = pf_data.get("nickname") or tg_user.get("first_name", "User")
+                pf_orgs = pf_data.get("organizations", [])
+
+                # Build list of org_ids to link: personal + each org
+                org_contexts = [f"personal_{pf_user_id}"]
+                for org in pf_orgs:
+                    org_contexts.append(str(org["id"]))
+
+                # For each context: find existing staff or create new
+                for org_id in org_contexts:
+                    is_personal = org_id.startswith("personal_")
+                    result = await db.execute(
+                        select(Staff).where(
+                            Staff.postforge_user_id == pf_user_id,
+                            Staff.postforge_org_id == org_id,
+                        )
+                    )
+                    existing = result.scalar_one_or_none()
+
+                    if existing:
+                        # Just set real_tg_id and activate
+                        existing.real_tg_id = tg_id
+                        if not existing.is_active:
+                            existing.is_active = True
+                        all_staff.append(existing)
+                    else:
+                        # Determine role
+                        if is_personal:
+                            crm_role = "super_admin"
+                        else:
+                            org_info = next((o for o in pf_orgs if str(o["id"]) == org_id), None)
+                            if org_info and org_info.get("is_owner"):
+                                crm_role = "super_admin"
+                            elif org_info and org_info.get("role") in ("OWNER", "ADMIN", "owner", "admin"):
+                                crm_role = "admin"
+                            else:
+                                crm_role = "operator"
+
+                        synthetic = int(hashlib.sha256(f"{pf_user_id}:{org_id}".encode()).hexdigest()[:15], 16)
+                        staff = Staff(
+                            tg_user_id=synthetic,
+                            tg_username=tg_user.get("username"),
+                            role=crm_role,
+                            name=pf_nickname,
+                            real_tg_id=tg_id,
+                            postforge_user_id=pf_user_id,
+                            postforge_org_id=org_id,
+                        )
+                        db.add(staff)
+                        all_staff.append(staff)
+
+                if all_staff:
+                    await db.commit()
+                    for s in all_staff:
+                        await db.refresh(s)
+        except Exception as e:
+            import traceback
+            print(f"[TG_AUTH] PostForge lookup failed: {e}")
+            traceback.print_exc()
+
+    # 3b. Auto-create for admin chat ID if still no staff
+    if not all_staff and tg_id == settings.TG_ADMIN_CHAT_ID:
+        import hashlib
+        personal_org_id = f"personal_admin_{tg_id}"
+        synthetic = int(hashlib.sha256(f"tg:{tg_id}:{personal_org_id}".encode()).hexdigest()[:15], 16)
         user = Staff(
-            tg_user_id=tg_id,
+            tg_user_id=synthetic,
             tg_username=tg_user.get("username"),
             role="super_admin",
             name=tg_user.get("first_name", "Admin"),
+            real_tg_id=tg_id,
+            postforge_org_id=personal_org_id,
         )
         db.add(user)
         await db.commit()
         await db.refresh(user)
+        all_staff = [user]
+
+    if not all_staff:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нет доступа. Привяжите Telegram в METRA AI.")
+
+    # 4. Single workspace — auto-login
+    if len(all_staff) == 1:
+        user = all_staff[0]
+        return TgAuthResponse(
+            access_token=create_token(user.id, "access"),
+            refresh_token=create_token(user.id, "refresh"),
+            role=user.role,
+        )
+
+    # 5. Multiple workspaces — return list for user to choose
+    workspaces = []
+    for s in all_staff:
+        org_id = s.postforge_org_id or "unknown"
+        if org_id.startswith("personal_"):
+            name = "Личное"
+        else:
+            name = f"Команда"  # Could fetch org name from PostForge, but keep simple
+        workspaces.append(TgWorkspaceItem(org_id=org_id, name=name, role=s.role))
+
+    return TgAuthResponse(workspaces=workspaces)
+
+
+@app.post("/api/auth/tg/select", response_model=TokenResponse)
+async def tg_auth_select(req: TgWorkspaceSelect, db: DB):
+    """Select a workspace after TG auth returned multiple options."""
+    tg_user = validate_tg_init_data(req.init_data)
+    tg_id = tg_user.get("id")
+    if not tg_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No user ID")
+
+    # Find staff matching this TG user + selected org
+    result = await db.execute(
+        select(Staff).where(
+            Staff.real_tg_id == tg_id,
+            Staff.postforge_org_id == req.org_id,
+            Staff.is_active.is_(True),
+        )
+    )
+    user = result.scalar_one_or_none()
+
+    # Also try legacy tg_user_id match
+    if not user:
+        result = await db.execute(
+            select(Staff).where(
+                Staff.tg_user_id == tg_id,
+                Staff.postforge_org_id == req.org_id,
+                Staff.is_active.is_(True),
+            )
+        )
+        user = result.scalar_one_or_none()
 
     if not user:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "No access. Use an invite link from the bot.")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нет доступа к этому пространству")
 
     return TokenResponse(
         access_token=create_token(user.id, "access"),
@@ -162,31 +400,140 @@ async def refresh(req: RefreshRequest, db: DB):
     )
 
 
+@app.post("/api/auth/sso", response_model=TokenResponse)
+async def sso_auth(req: SsoAuthRequest, db: DB):
+    """Authenticate via PostForge SSO token.
+
+    Verifies the token against PostForge API, auto-creates Staff if needed.
+    Used when CRM is embedded inside PostForge (iframe) or opened from PostForge.
+    """
+    import httpx
+
+    if not settings.POSTFORGE_API_URL:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "SSO not configured")
+
+    # Verify PostForge token by calling PostForge /api/me
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{settings.POSTFORGE_API_URL}/api/me",
+                headers={"Authorization": f"Bearer {req.postforge_token}"},
+            )
+        if resp.status_code != 200:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid PostForge token")
+        pf_user = resp.json()
+    except httpx.RequestError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Cannot reach PostForge: {e}")
+
+    pf_user_id = str(pf_user.get("id"))
+    pf_email = pf_user.get("email", "")
+    pf_nickname = pf_user.get("nickname", "User")
+    pf_tg_id = pf_user.get("telegram_id")  # If PostForge user has linked Telegram
+    pf_org_id = pf_user.get("organization_id")  # Team/org context
+    pf_org_role = pf_user.get("organization_role")  # owner | admin | buyer | editor | custom
+    pf_is_org_owner = pf_user.get("is_org_owner", False)
+
+    import hashlib
+    # Effective org_id: team UUID or "personal_{user_id}" for solo
+    effective_org_id = str(pf_org_id) if pf_org_id else f"personal_{pf_user_id}"
+    import logging
+    logging.info(f"[SSO] user={pf_user_id} pf_org_id={pf_org_id} effective_org_id={effective_org_id} pf_org_role={pf_org_role}")
+    # Unique tg_user_id per org context (hash of user_id + org_id)
+    synthetic_tg_id = int(hashlib.sha256(f"{pf_user_id}:{effective_org_id}".encode()).hexdigest()[:15], 16)
+
+    # Determine CRM role based on PostForge context:
+    # - Personal (solo) mode → super_admin (full control of own CRM)
+    # - Team owner → super_admin
+    # - Team admin → admin
+    # - Everyone else → operator
+    if not pf_org_id:
+        crm_role = "super_admin"
+    elif pf_is_org_owner:
+        crm_role = "super_admin"
+    elif pf_org_role in ("owner", "admin"):
+        crm_role = "admin"
+    else:
+        crm_role = "operator"
+
+    # Find existing Staff by (postforge_user_id, postforge_org_id) pair
+    result = await db.execute(
+        select(Staff).where(
+            Staff.postforge_user_id == pf_user_id,
+            Staff.postforge_org_id == effective_org_id,
+            Staff.is_active.is_(True),
+        )
+    )
+    user = result.scalar_one_or_none()
+
+    # Auto-create staff for SSO users
+    if not user:
+        user = Staff(
+            tg_user_id=synthetic_tg_id,
+            tg_username=pf_email.split("@")[0] if pf_email else None,
+            role=crm_role,
+            name=pf_nickname or pf_email.split("@")[0],
+            postforge_user_id=pf_user_id,
+            postforge_org_id=effective_org_id,
+            real_tg_id=pf_tg_id,  # Store real TG ID for Mini App auth
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    else:
+        # Sync role, name, and real_tg_id from PostForge on each login
+        changed = False
+        if user.role != crm_role:
+            user.role = crm_role
+            changed = True
+        if pf_nickname and user.name != pf_nickname:
+            user.name = pf_nickname
+            changed = True
+        if pf_tg_id and user.real_tg_id != pf_tg_id:
+            user.real_tg_id = pf_tg_id
+            changed = True
+        if changed:
+            await db.commit()
+
+    return TokenResponse(
+        access_token=create_token(user.id, "access"),
+        refresh_token=create_token(user.id, "refresh"),
+        role=user.role,
+    )
+
+
 # ============================================================
 # Telegram Accounts
 # ============================================================
 
 @app.post("/api/tg/connect")
-async def tg_connect(req: TgConnectRequest, user: SuperAdmin):
-    await start_connect(req.phone)
-    return {"status": "code_sent"}
+async def tg_connect(req: TgConnectRequest, user: CurrentUser):
+    result = await start_connect(req.phone)
+    return {"status": "code_sent", "debug": result}
 
 
 @app.post("/api/tg/verify", response_model=TgAccountOut)
-async def tg_verify(req: TgVerifyRequest, user: SuperAdmin):
+async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
     account = await verify_code(req.phone, req.code, req.password_2fa)
+    # Set org_id on the newly connected account
+    result = await db.execute(select(TgAccount).where(TgAccount.id == account.id))
+    tg_acc = result.scalar_one_or_none()
+    if tg_acc:
+        tg_acc.org_id = _org_id(user)
+        await db.commit()
+    # Auto-sync dialogs in background after connecting
+    asyncio.create_task(_do_sync_dialogs(account.id, 50))
     return account
 
 
 @app.get("/api/tg/status", response_model=list[TgAccountOut])
-async def tg_status(user: AdminUser, db: DB):
-    result = await db.execute(select(TgAccount))
+async def tg_status(user: CurrentUser, db: DB):
+    result = await db.execute(select(TgAccount).where(TgAccount.org_id == _org_id(user)))
     return result.scalars().all()
 
 
 @app.delete("/api/tg/disconnect/{account_id}")
-async def tg_disconnect(account_id: UUID, user: SuperAdmin, db: DB):
-    result = await db.execute(select(TgAccount).where(TgAccount.id == account_id))
+async def tg_disconnect(account_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(TgAccount).where(TgAccount.id == account_id, TgAccount.org_id == _org_id(user)))
     account = result.scalar_one_or_none()
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -210,6 +557,9 @@ async def list_contacts(
 ):
     query = select(Contact)
 
+    # Org scoping: only contacts from this org's TG accounts
+    query = query.where(Contact.tg_account_id.in_(_org_accounts_subq(user)))
+
     # Operators see contacts from their assigned TG accounts
     if user.role == "operator":
         sub = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
@@ -224,12 +574,47 @@ async def list_contacts(
 
     query = query.order_by(Contact.last_message_at.desc().nullslast())
     result = await db.execute(query)
-    return result.scalars().all()
+    contacts = list(result.scalars().all())
+
+    # Always show real titles for groups/channels/supergroups
+    # For private contacts, show real names only if show_real_names is enabled for this org
+    admin_result = await db.execute(
+        select(Staff).where(Staff.postforge_org_id == _org_id(user), Staff.show_real_names.is_(True)).limit(1)
+    )
+    show_real = admin_result.scalar_one_or_none() is not None
+
+    for c in contacts:
+        if c.chat_type != "private":
+            # Groups/channels — always show real title
+            title = decrypt(c.group_title_encrypted) if c.group_title_encrypted else None
+            if title:
+                c.alias = title
+        elif show_real:
+            real_name = decrypt(c.real_name_encrypted) if c.real_name_encrypted else None
+            if real_name:
+                c.alias = real_name
+
+    return contacts
 
 
 @app.get("/api/contacts/{contact_id}", response_model=ContactOut)
 async def get_contact(contact_id: UUID, user: CurrentUser, db: DB):
     contact = await _get_contact_with_access(contact_id, user, db)
+
+    # Always show real title for groups/channels/supergroups
+    if contact.chat_type != "private":
+        title = decrypt(contact.group_title_encrypted) if contact.group_title_encrypted else None
+        if title:
+            contact.alias = title
+    else:
+        admin_result = await db.execute(
+            select(Staff).where(Staff.postforge_org_id == _org_id(user), Staff.show_real_names.is_(True)).limit(1)
+        )
+        if admin_result.scalar_one_or_none() is not None:
+            real_name = decrypt(contact.real_name_encrypted) if contact.real_name_encrypted else None
+            if real_name:
+                contact.alias = real_name
+
     return contact
 
 
@@ -245,6 +630,8 @@ async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser
         contact.notes = req.notes
     if req.assigned_to is not None and user.role in ("super_admin", "admin"):
         contact.assigned_to = req.assigned_to
+    if req.is_archived is not None:
+        contact.is_archived = req.is_archived
 
     await db.commit()
     await db.refresh(contact)
@@ -253,7 +640,7 @@ async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser
 
 @app.post("/api/contacts/{contact_id}/approve", response_model=ContactOut)
 async def approve_contact(contact_id: UUID, user: AdminUser, db: DB):
-    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    result = await db.execute(select(Contact).where(Contact.id == contact_id, Contact.tg_account_id.in_(_org_accounts_subq(user))))
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -272,7 +659,7 @@ async def approve_contact(contact_id: UUID, user: AdminUser, db: DB):
 
 @app.post("/api/contacts/{contact_id}/block", response_model=ContactOut)
 async def block_contact(contact_id: UUID, user: AdminUser, db: DB):
-    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    result = await db.execute(select(Contact).where(Contact.id == contact_id, Contact.tg_account_id.in_(_org_accounts_subq(user))))
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -289,9 +676,9 @@ async def block_contact(contact_id: UUID, user: AdminUser, db: DB):
 
 
 @app.delete("/api/contacts/{contact_id}", status_code=204)
-async def delete_contact(contact_id: UUID, user: CurrentUser, db: DB):
+async def delete_contact(contact_id: UUID, user: AdminUser, db: DB):
     """Delete a contact and its messages from CRM (does not affect Telegram)."""
-    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    result = await db.execute(select(Contact).where(Contact.id == contact_id, Contact.tg_account_id.in_(_org_accounts_subq(user))))
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -423,7 +810,12 @@ async def add_member_endpoint(contact_id: UUID, req: dict, user: AdminUser, db: 
 
 
 async def _get_contact_with_access(contact_id: UUID, user: Staff, db: AsyncSession) -> Contact:
-    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    result = await db.execute(
+        select(Contact).where(
+            Contact.id == contact_id,
+            Contact.tg_account_id.in_(_org_accounts_subq(user)),  # org scoping
+        )
+    )
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -442,6 +834,59 @@ async def _get_contact_with_access(contact_id: UUID, user: Staff, db: AsyncSessi
 # Messages
 # ============================================================
 
+@app.get("/api/messages/{contact_id}/topics")
+async def get_contact_topics(contact_id: UUID, user: CurrentUser, db: DB):
+    """Get list of forum topics directly from Telegram API."""
+    contact = await _get_contact_with_access(contact_id, user, db)
+    if not contact.is_forum or not contact.tg_account_id:
+        return []
+
+    from telegram import _clients
+    client = _clients.get(contact.tg_account_id)
+    if not client:
+        # Fallback to DB
+        result = await db.execute(
+            select(Message.topic_id, Message.topic_name)
+            .where(Message.contact_id == contact_id, Message.topic_id.isnot(None))
+            .group_by(Message.topic_id, Message.topic_name)
+            .order_by(Message.topic_id)
+        )
+        return [{"id": row[0], "name": row[1] or ("General" if row[0] == 1 else f"Topic #{row[0]}")} for row in result.all()]
+
+    # Fetch topics from Telegram
+    topics = [{"id": 1, "name": "General"}]
+    try:
+        from telethon.tl.functions.channels import GetForumTopicsByIDRequest, GetForumTopicsRequest
+        entity = await client.get_input_entity(contact.real_tg_id)
+        result = await client(GetForumTopicsRequest(
+            channel=entity, offset_date=None, offset_id=0, offset_topic=0, limit=100,
+        ))
+        for t in result.topics:
+            if t.id != 1:
+                topics.append({"id": t.id, "name": t.title})
+    except ImportError:
+        # Telethon version without forum support — fallback to DB
+        result = await db.execute(
+            select(Message.topic_id, Message.topic_name)
+            .where(Message.contact_id == contact_id, Message.topic_id.isnot(None))
+            .group_by(Message.topic_id, Message.topic_name)
+            .order_by(Message.topic_id)
+        )
+        topics = [{"id": row[0], "name": row[1] or ("General" if row[0] == 1 else f"Topic #{row[0]}")} for row in result.all()]
+    except Exception as e:
+        print(f"[TOPICS] Failed to fetch from TG: {e}")
+        # Fallback to DB
+        result = await db.execute(
+            select(Message.topic_id, Message.topic_name)
+            .where(Message.contact_id == contact_id, Message.topic_id.isnot(None))
+            .group_by(Message.topic_id, Message.topic_name)
+            .order_by(Message.topic_id)
+        )
+        topics = [{"id": row[0], "name": row[1] or ("General" if row[0] == 1 else f"Topic #{row[0]}")} for row in result.all()]
+
+    return topics
+
+
 @app.get("/api/messages/{contact_id}", response_model=list[MessageOut])
 async def get_messages(
     contact_id: UUID,
@@ -449,8 +894,105 @@ async def get_messages(
     db: DB,
     limit: int = Query(50, le=200),
     offset: int = Query(0),
+    topic_id: int | None = Query(None),
 ):
-    await _get_contact_with_access(contact_id, user, db)
+    contact = await _get_contact_with_access(contact_id, user, db)
+
+    # On-demand fetch from Telegram for forum topics with few messages in DB
+    if contact.is_forum and contact.tg_account_id and topic_id is not None:
+        from telegram import _resolve_topic_name, _clients, _extract_media, sanitize_text
+        client = _clients.get(contact.tg_account_id)
+        if client:
+            # Check how many messages we have for this topic
+            count_q = select(func.count(Message.id)).where(
+                Message.contact_id == contact_id, Message.topic_id == topic_id
+            )
+            db_count = (await db.execute(count_q)).scalar() or 0
+
+            if db_count < limit:
+                # Fetch more from Telegram for this topic
+                try:
+                    existing_tg_ids_q = select(Message.tg_message_id).where(
+                        Message.contact_id == contact_id,
+                        Message.tg_message_id.isnot(None),
+                    )
+                    existing_result = await db.execute(existing_tg_ids_q)
+                    existing_tg_ids = {r[0] for r in existing_result.all()}
+
+                    me = await client.get_me()
+                    tg_msgs = await client.get_messages(
+                        contact.real_tg_id, reply_to=topic_id, limit=200
+                    )
+                    added = 0
+                    for msg_obj in tg_msgs:
+                        if not msg_obj or msg_obj.id in existing_tg_ids:
+                            continue
+                        if not (msg_obj.text or msg_obj.media):
+                            continue
+
+                        sender_id = getattr(msg_obj, "sender_id", None) or getattr(msg_obj, "from_id", None)
+                        if hasattr(sender_id, "user_id"):
+                            sender_id = sender_id.user_id
+                        direction = "outgoing" if sender_id == me.id else "incoming"
+
+                        media_type, ext = _extract_media(msg_obj)
+                        media_path = None
+                        if media_type and msg_obj.media:
+                            try:
+                                fname = f"{contact.id}_{msg_obj.id}{ext or ''}"
+                                dl_path = os.path.join(MEDIA_DIR, fname)
+                                await client.download_media(msg_obj, file=dl_path)
+                                media_path = fname
+                            except Exception:
+                                pass
+
+                        sender_tg_id_val = None
+                        sender_alias_val = None
+                        if contact.chat_type != "private" and direction == "incoming":
+                            sender = getattr(msg_obj, "sender", None)
+                            if sender:
+                                sender_tg_id_val = getattr(sender, "id", None)
+                                fn = getattr(sender, "first_name", "") or ""
+                                ln = getattr(sender, "last_name", "") or ""
+                                tt = getattr(sender, "title", "") or ""
+                                sender_alias_val = (f"{fn} {ln}".strip() or tt or "User")
+
+                        topic_name_val = await _resolve_topic_name(client, contact.real_tg_id, topic_id, contact.tg_account_id)
+
+                        fwd_alias = None
+                        if msg_obj.forward:
+                            fwd_sender = msg_obj.forward.sender
+                            if fwd_sender:
+                                fn = getattr(fwd_sender, "first_name", "") or ""
+                                ln = getattr(fwd_sender, "last_name", "") or ""
+                                tt = getattr(fwd_sender, "title", "") or ""
+                                fwd_alias = (f"{fn} {ln}".strip() or tt or "User")
+
+                        msg_date = msg_obj.date.replace(tzinfo=None) if msg_obj.date else datetime.utcnow()
+                        db_msg = Message(
+                            contact_id=contact.id,
+                            tg_message_id=msg_obj.id,
+                            direction=direction,
+                            content=sanitize_text(msg_obj.text),
+                            media_type=media_type,
+                            media_path=media_path,
+                            is_read=True,
+                            sender_tg_id=sender_tg_id_val,
+                            sender_alias=sender_alias_val,
+                            topic_id=topic_id,
+                            topic_name=topic_name_val,
+                            forwarded_from_alias=fwd_alias,
+                            created_at=msg_date,
+                        )
+                        db.add(db_msg)
+                        added += 1
+
+                    if added:
+                        await db.commit()
+                        print(f"[TOPIC-FETCH] Loaded {added} messages for topic {topic_id} in contact {contact_id}")
+                except Exception as e:
+                    await db.rollback()
+                    print(f"[TOPIC-FETCH] Error: {e}")
 
     query = (
         select(Message)
@@ -459,8 +1001,51 @@ async def get_messages(
         .offset(offset)
         .limit(limit)
     )
+    if topic_id is not None:
+        query = query.where(Message.topic_id == topic_id)
     result = await db.execute(query)
-    return list(reversed(result.scalars().all()))
+    messages = list(reversed(result.scalars().all()))
+
+    # Backfill topic_id and topic_name for forum supergroups (for "all topics" view)
+    if contact.is_forum and contact.tg_account_id and topic_id is None:
+        from telegram import _resolve_topic_name, _clients
+        client = _clients.get(contact.tg_account_id)
+        if client:
+            updated = False
+            needs_topic = [m for m in messages if m.topic_id is None and m.tg_message_id]
+            if needs_topic:
+                try:
+                    tg_ids = [m.tg_message_id for m in needs_topic]
+                    tg_msgs = await client.get_messages(contact.real_tg_id, ids=tg_ids)
+                    tg_map = {}
+                    for tm in tg_msgs:
+                        if tm:
+                            tg_map[tm.id] = tm
+                    for m in needs_topic:
+                        tm = tg_map.get(m.tg_message_id)
+                        if tm and tm.reply_to:
+                            rt = tm.reply_to
+                            if getattr(rt, "forum_topic", False):
+                                m.topic_id = getattr(rt, "reply_to_msg_id", None)
+                            else:
+                                m.topic_id = getattr(rt, "reply_to_top_id", None) or getattr(rt, "reply_to_msg_id", None)
+                        elif tm:
+                            m.topic_id = 1
+                        if m.topic_id:
+                            updated = True
+                except Exception as e:
+                    print(f"[TOPIC-BACKFILL] Error: {e}")
+
+            for m in messages:
+                if m.topic_id and not m.topic_name:
+                    name = await _resolve_topic_name(client, contact.real_tg_id, m.topic_id, contact.tg_account_id)
+                    if name:
+                        m.topic_name = name
+                        updated = True
+            if updated:
+                await db.commit()
+
+    return messages
 
 
 @app.post("/api/messages/{contact_id}/send", response_model=MessageOut)
@@ -535,6 +1120,9 @@ async def send_media(
     filename = f"{uuid_mod.uuid4()}{ext}"
     filepath = os.path.join(MEDIA_DIR, filename)
     data = await file.read()
+    MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 50MB)")
     with open(filepath, "wb") as f:
         f.write(data)
 
@@ -560,9 +1148,50 @@ async def send_media(
     return msg
 
 
+@app.post("/api/messages/{contact_id}/send-template-media", response_model=MessageOut)
+async def send_template_media(contact_id: UUID, user: CurrentUser, db: DB, template_id: UUID = Query(...)):
+    """Send a message using a template's media and text."""
+    contact = await _get_contact_with_access(contact_id, user, db)
+    if contact.status != "approved":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
+
+    result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
+
+    file_path = os.path.join(MEDIA_DIR, tpl.media_path) if tpl.media_path else None
+    tg_msg_id = await send_message(
+        contact.tg_account_id, contact.real_tg_id,
+        text=tpl.content or None,
+        file_path=file_path,
+        media_type=tpl.media_type,
+    )
+
+    msg = Message(
+        contact_id=contact.id,
+        tg_message_id=tg_msg_id,
+        direction="outgoing",
+        content=tpl.content,
+        media_type=tpl.media_type,
+        media_path=tpl.media_path,
+        sent_by=user.id,
+    )
+    db.add(msg)
+    contact.last_message_at = func.now()
+    await db.commit()
+    await db.refresh(msg)
+    return msg
+
+
 @app.patch("/api/messages/{contact_id}/read")
 async def mark_read(contact_id: UUID, user: CurrentUser, db: DB):
     """Mark all unread incoming messages in a contact chat as read."""
+    # Verify contact belongs to user's org
+    result = await db.execute(select(Contact).where(Contact.id == contact_id, Contact.tg_account_id.in_(_org_accounts_subq(user))))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
     from sqlalchemy import update
     await db.execute(
         update(Message)
@@ -587,6 +1216,7 @@ async def get_unread_counts(user: CurrentUser, db: DB):
             Message.direction == "incoming",
             Message.is_read.is_(False),
             Contact.status == "approved",
+            Contact.tg_account_id.in_(_org_accounts_subq(user)),
         )
         .group_by(Message.contact_id)
     )
@@ -636,6 +1266,29 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
     return {"status": "ok", "forwarded_count": len(fwd_ids)}
 
 
+@app.delete("/api/messages/{contact_id}/delete/{message_id}")
+async def delete_message(contact_id: UUID, message_id: UUID, user: CurrentUser, db: DB):
+    """Delete own outgoing message from Telegram and mark as deleted in DB."""
+    contact = await _get_contact_with_access(contact_id, user, db)
+    result = await db.execute(
+        select(Message).where(Message.id == message_id, Message.contact_id == contact_id, Message.direction == "outgoing")
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found")
+    # Delete from Telegram if possible
+    if msg.tg_message_id:
+        try:
+            from telegram import delete_messages
+            await delete_messages(contact.tg_account_id, contact.real_tg_id, [msg.tg_message_id])
+        except Exception:
+            pass  # best-effort deletion from TG
+    msg.is_deleted = True
+    msg.content = ""
+    await db.commit()
+    return {"status": "deleted"}
+
+
 @app.post("/api/messages/{contact_id}/press-button")
 async def press_btn(contact_id: UUID, req: PressButton, user: CurrentUser, db: DB):
     """Press an inline bot button."""
@@ -669,8 +1322,10 @@ async def get_me(user: CurrentUser):
 
 
 @app.get("/api/staff", response_model=list[StaffOut])
-async def list_staff(user: AdminUser, db: DB):
-    result = await db.execute(select(Staff).order_by(Staff.created_at))
+async def list_staff(user: CurrentUser, db: DB):
+    result = await db.execute(
+        select(Staff).where(Staff.postforge_org_id == _org_id(user)).order_by(Staff.created_at)
+    )
     return result.scalars().all()
 
 
@@ -693,7 +1348,7 @@ async def create_invite(req: BotInviteCreate, user: AdminUser, db: DB):
 
 @app.patch("/api/staff/{staff_id}", response_model=StaffOut)
 async def update_staff(staff_id: UUID, req: StaffUpdate, user: AdminUser, db: DB):
-    result = await db.execute(select(Staff).where(Staff.id == staff_id))
+    result = await db.execute(select(Staff).where(Staff.id == staff_id, Staff.postforge_org_id == _org_id(user)))
     target = result.scalar_one_or_none()
     if not target:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -706,6 +1361,10 @@ async def update_staff(staff_id: UUID, req: StaffUpdate, user: AdminUser, db: DB
         target.role = req.role
     if req.is_active is not None:
         target.is_active = req.is_active
+    if req.signature_mode is not None:
+        if req.signature_mode not in ("named", "anonymous"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "signature_mode must be 'named' or 'anonymous'")
+        target.signature_mode = req.signature_mode
 
     await db.commit()
     await db.refresh(target)
@@ -724,15 +1383,12 @@ async def get_staff_accounts(staff_id: UUID, user: AdminUser, db: DB):
 @app.put("/api/staff/{staff_id}/accounts")
 async def set_staff_accounts(staff_id: UUID, account_ids: list[UUID], user: AdminUser, db: DB):
     """Set TG accounts for a staff member (replace all)."""
-    # Verify staff exists
-    result = await db.execute(select(Staff).where(Staff.id == staff_id))
+    # Verify staff exists in same org
+    result = await db.execute(select(Staff).where(Staff.id == staff_id, Staff.postforge_org_id == _org_id(user)))
     if not result.scalar_one_or_none():
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
     # Delete existing assignments
-    await db.execute(
-        select(StaffTgAccount).where(StaffTgAccount.staff_id == staff_id)
-    )
     from sqlalchemy import delete
     await db.execute(delete(StaffTgAccount).where(StaffTgAccount.staff_id == staff_id))
 
@@ -746,7 +1402,7 @@ async def set_staff_accounts(staff_id: UUID, account_ids: list[UUID], user: Admi
 
 @app.delete("/api/staff/{staff_id}")
 async def deactivate_staff(staff_id: UUID, user: AdminUser, db: DB):
-    result = await db.execute(select(Staff).where(Staff.id == staff_id))
+    result = await db.execute(select(Staff).where(Staff.id == staff_id, Staff.postforge_org_id == _org_id(user)))
     target = result.scalar_one_or_none()
     if not target:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -763,17 +1419,843 @@ async def deactivate_staff(staff_id: UUID, user: AdminUser, db: DB):
 
 @app.get("/api/tags", response_model=list[TagOut])
 async def list_tags(user: CurrentUser, db: DB):
-    result = await db.execute(select(Tag).order_by(Tag.name))
+    result = await db.execute(select(Tag).where(Tag.org_id == _org_id(user)).order_by(Tag.name))
     return result.scalars().all()
 
 
 @app.post("/api/tags", response_model=TagOut)
 async def create_tag(req: TagCreate, user: AdminUser, db: DB):
-    tag = Tag(name=req.name, color=req.color, created_by=user.id)
+    tag = Tag(name=req.name, color=req.color, created_by=user.id, org_id=_org_id(user))
     db.add(tag)
     await db.commit()
     await db.refresh(tag)
     return tag
+
+
+# ============================================================
+# Message Templates
+# ============================================================
+
+@app.get("/api/templates", response_model=list[TemplateOut])
+async def list_templates(user: CurrentUser, db: DB):
+    result = await db.execute(select(MessageTemplate).where(MessageTemplate.org_id == _org_id(user)).order_by(MessageTemplate.title))
+    return result.scalars().all()
+
+
+@app.post("/api/templates", response_model=TemplateOut)
+async def create_template(req: TemplateCreate, user: CurrentUser, db: DB):
+    tpl = MessageTemplate(
+        title=req.title,
+        content=req.content,
+        category=req.category,
+        shortcut=req.shortcut,
+        created_by=user.id,
+        org_id=_org_id(user),
+    )
+    db.add(tpl)
+    await db.commit()
+    await db.refresh(tpl)
+    return tpl
+
+
+@app.patch("/api/templates/{template_id}", response_model=TemplateOut)
+async def update_template(template_id: UUID, req: TemplateUpdate, user: CurrentUser, db: DB):
+    result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    for field, val in req.model_dump(exclude_unset=True).items():
+        setattr(tpl, field, val)
+    await db.commit()
+    await db.refresh(tpl)
+    return tpl
+
+
+@app.delete("/api/templates/{template_id}")
+async def delete_template(template_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    await db.delete(tpl)
+    await db.commit()
+    return {"status": "deleted"}
+
+
+@app.post("/api/templates/{template_id}/upload-media")
+async def template_upload_media(
+    template_id: UUID,
+    user: CurrentUser,
+    db: DB,
+    file: UploadFile = File(...),
+    send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
+):
+    result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    filename = f"template_{template_id}{ext}"
+    filepath = os.path.join(MEDIA_DIR, filename)
+
+    content = await file.read()
+    MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 50MB)")
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    if send_as != "auto":
+        media_type = send_as
+    else:
+        ct = (file.content_type or "").lower()
+        if "image" in ct:
+            media_type = "photo"
+        elif "video" in ct:
+            media_type = "video"
+        elif "audio" in ct or "ogg" in ct:
+            media_type = "voice"
+        else:
+            media_type = "document"
+
+    # Convert video to circle
+    if media_type == "video_note":
+        import subprocess
+        out_path = os.path.join(MEDIA_DIR, f"template_{template_id}_circle.mp4")
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", filepath,
+                "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-an",
+                "-f", "mp4", out_path,
+            ], check=True, timeout=120, capture_output=True)
+            filename = f"template_{template_id}_circle.mp4"
+        except Exception:
+            media_type = "video"
+
+    # Convert audio to voice
+    if media_type == "voice" and ext not in (".ogg", ".oga"):
+        import subprocess
+        out_path = os.path.join(MEDIA_DIR, f"template_{template_id}_voice.ogg")
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", filepath,
+                "-c:a", "libopus", "-b:a", "64k", "-f", "ogg", out_path,
+            ], check=True, timeout=120, capture_output=True)
+            filename = f"template_{template_id}_voice.ogg"
+        except Exception:
+            media_type = "document"
+
+    tpl.media_type = media_type
+    tpl.media_path = filename
+    await db.commit()
+    return {"media_path": filename, "media_type": media_type}
+
+
+# ============================================================
+# Archive
+# ============================================================
+
+@app.post("/api/contacts/{contact_id}/archive")
+async def archive_contact(contact_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(Contact).where(Contact.id == contact_id, Contact.tg_account_id.in_(_org_accounts_subq(user))))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    contact.is_archived = True
+    await db.commit()
+    return {"status": "archived"}
+
+
+@app.post("/api/contacts/{contact_id}/unarchive")
+async def unarchive_contact(contact_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(Contact).where(Contact.id == contact_id, Contact.tg_account_id.in_(_org_accounts_subq(user))))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    contact.is_archived = False
+    await db.commit()
+    return {"status": "unarchived"}
+
+
+# ============================================================
+# Avatars (proxy Telegram profile photos)
+# ============================================================
+
+@app.get("/api/contacts/{contact_id}/avatar")
+async def get_contact_avatar(contact_id: UUID, db: DB, token: str = Query("")):
+    """Download and return the Telegram avatar for a contact."""
+    from fastapi.responses import FileResponse
+    # Verify token (passed as query param since <img src> can't send headers)
+    if not token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED)
+    payload = decode_token(token)
+    if payload.get("type") != "access":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED)
+
+    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    avatar_dir = os.path.join(MEDIA_DIR, "avatars")
+    os.makedirs(avatar_dir, exist_ok=True)
+    avatar_path = os.path.join(avatar_dir, f"{contact_id}.jpg")
+
+    # Check cache (refresh every 24h)
+    if os.path.exists(avatar_path):
+        import time
+        age = time.time() - os.path.getmtime(avatar_path)
+        if age < 86400:  # 24h cache
+            return FileResponse(avatar_path, media_type="image/jpeg")
+
+    # Download from Telegram
+    from telegram import _clients
+    client = _clients.get(contact.tg_account_id)
+    if not client:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not connected")
+
+    try:
+        photo = await client.download_profile_photo(contact.real_tg_id, file=avatar_path)
+        if photo:
+            return FileResponse(avatar_path, media_type="image/jpeg")
+    except Exception:
+        pass
+
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "No avatar")
+
+
+# ============================================================
+# Message Editing
+# ============================================================
+
+@app.patch("/api/messages/{contact_id}/{message_id}/edit")
+async def edit_message(contact_id: UUID, message_id: UUID, req: SendMessage, user: CurrentUser, db: DB):
+    """Edit a previously sent outgoing message."""
+    result = await db.execute(select(Message).where(Message.id == message_id, Message.contact_id == contact_id))
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if msg.direction != "outgoing":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Can only edit outgoing messages")
+    if not msg.tg_message_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No Telegram message ID")
+
+    # Get contact for TG details
+    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    # Edit on Telegram
+    from telegram import _clients
+    client = _clients.get(contact.tg_account_id)
+    if not client:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account not connected")
+
+    try:
+        await client.edit_message(contact.real_tg_id, msg.tg_message_id, req.content)
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Edit failed: {e}")
+
+    msg.content = req.content
+    msg.is_edited = True
+    await db.commit()
+    return {"status": "edited"}
+
+
+# ============================================================
+# Translation
+# ============================================================
+
+@app.post("/api/translate")
+async def translate_text(req: TranslateRequest, user: CurrentUser):
+    """Translate text using free Google Translate (via googletrans-like API)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={
+                    "client": "gtx",
+                    "sl": "auto",
+                    "tl": req.target_lang,
+                    "dt": "t",
+                    "q": req.text,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                translated = "".join(part[0] for part in data[0] if part[0])
+                detected_lang = data[2] if len(data) > 2 else "unknown"
+                return {"translated": translated, "detected_lang": detected_lang}
+    except Exception as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Translation failed: {e}")
+    raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Translation service unavailable")
+
+
+# ============================================================
+# Broadcasts
+# ============================================================
+
+@app.get("/api/broadcasts", response_model=list[BroadcastOut])
+async def list_broadcasts(user: CurrentUser, db: DB):
+    result = await db.execute(select(Broadcast).where(Broadcast.org_id == _org_id(user)).order_by(Broadcast.created_at.desc()))
+    return result.scalars().all()
+
+
+@app.post("/api/broadcasts", response_model=BroadcastOut)
+async def create_broadcast(req: BroadcastCreate, user: CurrentUser, db: DB):
+    bc = Broadcast(
+        title=req.title,
+        content=req.content,
+        tg_account_id=req.tg_account_id,
+        tag_filter=req.tag_filter,
+        delay_seconds=max(1, min(3600, req.delay_seconds)),
+        max_recipients=req.max_recipients,
+        contact_ids=req.contact_ids or [],
+        created_by=user.id,
+        org_id=_org_id(user),
+    )
+    db.add(bc)
+    await db.commit()
+    await db.refresh(bc)
+    return bc
+
+
+@app.post("/api/broadcasts/{broadcast_id}/upload-media")
+async def broadcast_upload_media(
+    broadcast_id: UUID,
+    user: CurrentUser,
+    db: DB,
+    file: UploadFile = File(...),
+    send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
+):
+    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    filename = f"broadcast_{broadcast_id}{ext}"
+    filepath = os.path.join(MEDIA_DIR, filename)
+
+    content = await file.read()
+    MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 50MB)")
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    # Auto-detect or use explicit type
+    if send_as != "auto":
+        media_type = send_as
+    else:
+        ct = (file.content_type or "").lower()
+        if "image" in ct:
+            media_type = "photo"
+        elif "video" in ct:
+            media_type = "video"
+        elif "audio" in ct or "ogg" in ct:
+            media_type = "voice"
+        else:
+            media_type = "document"
+
+    # Convert video to circle (video_note) — crop to square, max 60s, no audio
+    if media_type == "video_note":
+        import subprocess
+        out_path = os.path.join(MEDIA_DIR, f"broadcast_{broadcast_id}_circle.mp4")
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", filepath,
+                "-t", "60",
+                "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+                "-an",  # no audio for video notes
+                "-f", "mp4", out_path,
+            ], check=True, timeout=120, capture_output=True)
+            filename = f"broadcast_{broadcast_id}_circle.mp4"
+        except Exception as e:
+            print(f"[FFMPEG] video_note conversion failed: {e}")
+            # fallback to regular video
+            media_type = "video"
+
+    # Convert audio to voice (ogg opus)
+    if media_type == "voice" and ext not in (".ogg", ".oga"):
+        import subprocess
+        out_path = os.path.join(MEDIA_DIR, f"broadcast_{broadcast_id}_voice.ogg")
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", filepath,
+                "-c:a", "libopus", "-b:a", "64k",
+                "-f", "ogg", out_path,
+            ], check=True, timeout=120, capture_output=True)
+            filename = f"broadcast_{broadcast_id}_voice.ogg"
+        except Exception as e:
+            print(f"[FFMPEG] voice conversion failed: {e}")
+            media_type = "document"
+
+    bc.media_type = media_type
+    bc.media_path = filename
+    await db.commit()
+    return {"media_path": filename, "media_type": media_type}
+
+
+@app.post("/api/broadcasts/{broadcast_id}/start")
+async def start_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if bc.status not in ("draft", "paused"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Cannot start from status {bc.status}")
+
+    # Build recipient list
+    import random as _random
+    if bc.contact_ids:
+        # Manual selection — use specified contacts (private only)
+        result = await db.execute(
+            select(Contact).where(
+                Contact.id.in_(bc.contact_ids),
+                Contact.tg_account_id == bc.tg_account_id,
+                Contact.status == "approved",
+                Contact.chat_type == "private",
+                Contact.is_archived.is_(False),
+            )
+        )
+        contacts = list(result.scalars().all())
+    else:
+        q = select(Contact).where(
+            Contact.tg_account_id == bc.tg_account_id,
+            Contact.status == "approved",
+            Contact.chat_type == "private",
+            Contact.is_archived.is_(False),
+        )
+        if bc.tag_filter:
+            q = q.where(Contact.tags.overlap(bc.tag_filter))
+        result = await db.execute(q)
+        contacts = list(result.scalars().all())
+
+    # Random N from filtered set
+    if bc.max_recipients and len(contacts) > bc.max_recipients:
+        contacts = _random.sample(contacts, bc.max_recipients)
+
+    if not contacts:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No matching recipients")
+
+    # Create recipients (clear old if restarting)
+    if bc.status == "draft":
+        await db.execute(
+            sa_delete(BroadcastRecipient).where(BroadcastRecipient.broadcast_id == bc.id)
+        )
+        for c in contacts:
+            db.add(BroadcastRecipient(broadcast_id=bc.id, contact_id=c.id))
+
+    bc.status = "running"
+    bc.total_recipients = len(contacts)
+    bc.sent_count = 0
+    bc.failed_count = 0
+    bc.started_at = datetime.utcnow()
+    await db.commit()
+
+    # Run broadcast in background
+    asyncio.create_task(_run_broadcast(bc.id))
+    return {"status": "started", "recipients": len(contacts)}
+
+
+@app.post("/api/broadcasts/{broadcast_id}/pause")
+async def pause_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if bc.status != "running":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not running")
+    bc.status = "paused"
+    await db.commit()
+    return {"status": "paused"}
+
+
+@app.post("/api/broadcasts/{broadcast_id}/cancel")
+async def cancel_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    bc.status = "cancelled"
+    await db.commit()
+    return {"status": "cancelled"}
+
+
+@app.patch("/api/broadcasts/{broadcast_id}", response_model=BroadcastOut)
+async def update_broadcast(broadcast_id: UUID, req: BroadcastCreate, user: CurrentUser, db: DB):
+    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if bc.status not in ("draft",):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Can only edit draft broadcasts")
+    bc.title = req.title
+    bc.content = req.content
+    bc.tg_account_id = req.tg_account_id
+    bc.tag_filter = req.tag_filter
+    bc.delay_seconds = max(1, min(3600, req.delay_seconds))
+    bc.max_recipients = req.max_recipients
+    bc.contact_ids = req.contact_ids or []
+    await db.commit()
+    await db.refresh(bc)
+    return bc
+
+
+@app.delete("/api/broadcasts/{broadcast_id}")
+async def delete_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if bc.status in ("running",):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete a running broadcast")
+    # Delete recipients first
+    from sqlalchemy import delete
+    await db.execute(delete(BroadcastRecipient).where(BroadcastRecipient.broadcast_id == broadcast_id))
+    await db.delete(bc)
+    await db.commit()
+    return {"status": "deleted"}
+
+
+async def _run_broadcast(broadcast_id: UUID):
+    """Background task to send broadcast messages with delay."""
+    from models import async_session
+    async with async_session() as db:
+        result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id))
+        bc = result.scalar_one_or_none()
+        if not bc:
+            return
+
+        result = await db.execute(
+            select(BroadcastRecipient)
+            .where(BroadcastRecipient.broadcast_id == broadcast_id, BroadcastRecipient.status == "pending")
+        )
+        recipients = result.scalars().all()
+
+        for recip in recipients:
+            # Check if paused/cancelled
+            await db.refresh(bc)
+            if bc.status != "running":
+                return
+
+            # Get contact
+            result = await db.execute(select(Contact).where(Contact.id == recip.contact_id))
+            contact = result.scalar_one_or_none()
+            if not contact:
+                recip.status = "failed"
+                recip.error = "Contact not found"
+                bc.failed_count += 1
+                await db.commit()
+                continue
+
+            try:
+                file_path = os.path.join(MEDIA_DIR, bc.media_path) if bc.media_path else None
+                tg_msg_id = await send_message(
+                    bc.tg_account_id,
+                    contact.real_tg_id,
+                    text=bc.content,
+                    file_path=file_path,
+                    media_type=bc.media_type,
+                )
+
+                # Save message to DB so it shows in chat
+                msg = Message(
+                    contact_id=contact.id,
+                    tg_message_id=tg_msg_id,
+                    direction="outgoing",
+                    content=bc.content,
+                    media_type=bc.media_type,
+                    media_path=bc.media_path,
+                    sent_by=bc.created_by,
+                )
+                db.add(msg)
+                contact.last_message_at = datetime.utcnow()
+
+                recip.status = "sent"
+                recip.sent_at = datetime.utcnow()
+                bc.sent_count += 1
+            except Exception as e:
+                recip.status = "failed"
+                recip.error = str(e)[:500]
+                bc.failed_count += 1
+
+            await db.commit()
+
+            # Broadcast progress via WS
+            await ws_manager.broadcast_to_admins({
+                "type": "broadcast_progress",
+                "broadcast_id": str(broadcast_id),
+                "sent": bc.sent_count,
+                "failed": bc.failed_count,
+                "total": bc.total_recipients,
+            })
+
+            # Delay between sends
+            await asyncio.sleep(bc.delay_seconds)
+
+        # Mark completed
+        await db.refresh(bc)
+        if bc.status == "running":
+            bc.status = "completed"
+            bc.completed_at = datetime.utcnow()
+            await db.commit()
+            await ws_manager.broadcast_to_admins({
+                "type": "broadcast_status",
+                "broadcast_id": str(broadcast_id),
+                "status": "completed",
+            })
+
+
+# ============================================================
+# Load Old Dialogs
+# ============================================================
+
+async def _auto_sync_on_startup():
+    """Auto-sync dialogs for all connected accounts that have no contacts yet."""
+    await asyncio.sleep(3)  # Wait for Telethon clients to fully connect
+    from telegram import _clients
+    async with async_session() as db:
+        result = await db.execute(select(TgAccount).where(TgAccount.is_active.is_(True)))
+        accounts = result.scalars().all()
+    for account in accounts:
+        if account.id not in _clients:
+            continue
+        async with async_session() as db:
+            count = await db.execute(
+                select(func.count(Contact.id)).where(Contact.tg_account_id == account.id)
+            )
+            if count.scalar() == 0:
+                print(f"[AUTO-SYNC] No contacts for {account.phone}, starting sync...")
+                await _do_sync_dialogs(account.id, 50)
+
+
+async def _do_sync_dialogs(account_id: UUID, limit: int = 50) -> int:
+    """Background-safe: import dialogs for a TG account. Returns count imported."""
+    from telegram import _clients, generate_alias, _extract_media, sanitize_text
+    from crypto import encrypt
+
+    client = _clients.get(account_id)
+    if not client:
+        print(f"[SYNC] Account {account_id} not connected, skipping")
+        return 0
+
+    me = await client.get_me()
+    imported = 0
+
+    async with async_session() as db:
+        # Verify account exists
+        result = await db.execute(select(TgAccount).where(TgAccount.id == account_id))
+        account = result.scalar_one_or_none()
+        if not account:
+            print(f"[SYNC] Account {account_id} not found in DB")
+            return 0
+
+        async for dialog in client.iter_dialogs(limit=limit):
+            peer_id = dialog.id
+            if not peer_id:
+                continue
+
+            # Skip if contact already exists
+            result = await db.execute(
+                select(Contact).where(Contact.tg_account_id == account_id, Contact.real_tg_id == peer_id)
+            )
+            if result.scalar_one_or_none():
+                continue
+
+            # Determine chat type
+            entity = dialog.entity
+            is_forum = getattr(entity, "forum", False)
+            if getattr(entity, "megagroup", False) or is_forum:
+                chat_type = "supergroup"
+            elif dialog.is_group:
+                chat_type = "group"
+            elif dialog.is_channel:
+                chat_type = "channel"
+            else:
+                chat_type = "private"
+
+            # Get name
+            name = dialog.name or ""
+            username = getattr(entity, "username", None)
+
+            # Generate alias
+            seq_result = await db.execute(select(func.count(Contact.id)))
+            seq = seq_result.scalar() + 1
+
+            alias_base = generate_alias(name, seq)
+            while True:
+                check = await db.execute(select(Contact).where(Contact.alias == alias_base))
+                if not check.scalar_one_or_none():
+                    break
+                seq += 1
+                alias_base = generate_alias(name, seq)
+
+            contact = Contact(
+                tg_account_id=account_id,
+                real_tg_id=peer_id,
+                real_name_encrypted=encrypt(name) if name else None,
+                real_username_encrypted=encrypt(username) if username else None,
+                group_title_encrypted=encrypt(dialog.name) if chat_type != "private" and dialog.name else None,
+                chat_type=chat_type,
+                is_forum=is_forum,
+                alias=alias_base,
+                status="approved",
+                approved_at=datetime.utcnow(),
+            )
+            db.add(contact)
+            await db.commit()
+            await db.refresh(contact)
+
+            # Import last N messages from this dialog
+            msg_limit = 200 if is_forum else 30
+            try:
+                msgs = await client.get_messages(peer_id, limit=msg_limit)
+                for msg_obj in reversed(msgs):
+                    if not msg_obj or not (msg_obj.text or msg_obj.media):
+                        continue
+
+                    sender_id = getattr(msg_obj, "sender_id", None) or getattr(msg_obj, "from_id", None)
+                    if hasattr(sender_id, "user_id"):
+                        sender_id = sender_id.user_id
+                    direction = "outgoing" if sender_id == me.id else "incoming"
+
+                    media_type, ext = _extract_media(msg_obj)
+                    media_path = None
+                    if media_type and msg_obj.media:
+                        try:
+                            fname = f"{contact.id}_{msg_obj.id}{ext or ''}"
+                            dl_path = os.path.join(MEDIA_DIR, fname)
+                            await client.download_media(msg_obj, file=dl_path)
+                            media_path = fname
+                        except Exception:
+                            pass
+
+                    # Sender info for group messages
+                    sender_tg_id_val = None
+                    sender_alias_val = None
+                    if chat_type != "private" and direction == "incoming":
+                        sender = getattr(msg_obj, "sender", None)
+                        if sender:
+                            sender_tg_id_val = getattr(sender, "id", None)
+                            fname = getattr(sender, "first_name", "") or ""
+                            lname = getattr(sender, "last_name", "") or ""
+                            title = getattr(sender, "title", "") or ""
+                            sender_alias_val = (f"{fname} {lname}".strip() or title or "User")
+
+                    # Topic info for forum supergroups
+                    topic_id_val = None
+                    topic_name_val = None
+                    if is_forum and hasattr(msg_obj, "reply_to") and msg_obj.reply_to:
+                        rt = msg_obj.reply_to
+                        if getattr(rt, "forum_topic", False):
+                            topic_id_val = getattr(rt, "reply_to_msg_id", None)
+                        else:
+                            topic_id_val = getattr(rt, "reply_to_top_id", None) or getattr(rt, "reply_to_msg_id", None)
+                    elif is_forum:
+                        topic_id_val = 1  # General topic
+
+                    if topic_id_val is not None:
+                        from telegram import _resolve_topic_name
+                        topic_name_val = await _resolve_topic_name(client, peer_id, topic_id_val, account_id)
+
+                    # Forwarded from
+                    fwd_alias = None
+                    if msg_obj.forward:
+                        fwd_sender = msg_obj.forward.sender
+                        if fwd_sender:
+                            fn = getattr(fwd_sender, "first_name", "") or ""
+                            ln = getattr(fwd_sender, "last_name", "") or ""
+                            tt = getattr(fwd_sender, "title", "") or ""
+                            fwd_alias = (f"{fn} {ln}".strip() or tt or "User")
+
+                    # Strip timezone to match naive datetime columns
+                    msg_date = msg_obj.date.replace(tzinfo=None) if msg_obj.date else datetime.utcnow()
+                    db_msg = Message(
+                        contact_id=contact.id,
+                        tg_message_id=msg_obj.id,
+                        direction=direction,
+                        content=sanitize_text(msg_obj.text),
+                        media_type=media_type,
+                        media_path=media_path,
+                        is_read=True,
+                        sender_tg_id=sender_tg_id_val,
+                        sender_alias=sender_alias_val,
+                        topic_id=topic_id_val,
+                        topic_name=topic_name_val,
+                        forwarded_from_alias=fwd_alias,
+                        created_at=msg_date,
+                    )
+                    db.add(db_msg)
+
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                print(f"[SYNC] Failed to import messages for {peer_id}: {e}")
+
+            imported += 1
+
+    print(f"[SYNC] Finished: imported {imported} dialogs for account {account_id}")
+    return imported
+
+
+@app.post("/api/tg/{account_id}/sync-dialogs")
+async def sync_old_dialogs(account_id: UUID, user: AdminUser, limit: int = Query(50, le=200)):
+    """Trigger dialog sync as a background task."""
+    from telegram import _clients
+    client = _clients.get(account_id)
+    if not client:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account not connected")
+    asyncio.create_task(_do_sync_dialogs(account_id, limit))
+    return {"status": "sync_started"}
+
+
+# ============================================================
+# Staff Signature Mode
+# ============================================================
+
+@app.patch("/api/staff/me/signature")
+async def update_signature_mode(user: CurrentUser, db: DB, mode: str = Query(...)):
+    if mode not in ("named", "anonymous"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Mode must be 'named' or 'anonymous'")
+    result = await db.execute(select(Staff).where(Staff.id == user.id))
+    staff = result.scalar_one_or_none()
+    if staff:
+        staff.signature_mode = mode
+        await db.commit()
+    return {"signature_mode": mode}
+
+
+# ============================================================
+# CRM Settings (global, managed by super_admin)
+# ============================================================
+
+@app.get("/api/settings/crm")
+async def get_crm_settings(user: CurrentUser, db: DB):
+    """Get CRM settings for current org — true if ANY staff in this org has it enabled."""
+    result = await db.execute(
+        select(Staff).where(Staff.postforge_org_id == _org_id(user), Staff.show_real_names.is_(True)).limit(1)
+    )
+    has_real = result.scalar_one_or_none() is not None
+    return {
+        "show_real_names": has_real,
+    }
+
+
+@app.patch("/api/settings/crm")
+async def update_crm_settings(user: AdminUser, db: DB, show_real_names: bool = Query(...)):
+    """Update CRM settings for current org. Sets for ALL staff in this org."""
+    await db.execute(
+        sa_update(Staff).where(Staff.postforge_org_id == _org_id(user)).values(show_real_names=show_real_names)
+    )
+    await db.commit()
+    return {"show_real_names": show_real_names}
 
 
 # ============================================================

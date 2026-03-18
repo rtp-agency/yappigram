@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import Script from "next/script";
 import "./globals.css";
 
 export const viewport: Viewport = {
@@ -11,13 +12,13 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "YappiGram",
-  description: "YappiGram — Telegram CRM",
+  title: "METRA CRM",
+  description: "METRA CRM — Telegram CRM",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "YappiGram",
+    title: "METRA CRM",
   },
 };
 
@@ -25,7 +26,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="ru">
       <head>
-        <script src="https://telegram.org/js/telegram-web-app.js" />
+        <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
       </head>
       <body className="overscroll-none">{children}</body>
     </html>

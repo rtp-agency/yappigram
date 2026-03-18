@@ -2,7 +2,7 @@
 // API Client
 // ============================================================
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 interface TokenPair {
   access_token: string;
@@ -13,7 +13,13 @@ interface TokenPair {
 export function getTokens(): TokenPair | null {
   if (typeof window === "undefined") return null;
   const raw = localStorage.getItem("tokens");
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    clearTokens();
+    return null;
+  }
 }
 
 export function saveTokens(tokens: TokenPair) {
@@ -48,10 +54,13 @@ async function refreshTokens(): Promise<string | null> {
   return data.access_token;
 }
 
+let _refreshPromise: Promise<string | null> | null = null;
+
 export async function api(path: string, options: RequestInit = {}): Promise<any> {
   const tokens = getTokens();
+  const isFormData = options.body instanceof FormData;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
     ...(options.headers as Record<string, string>),
   };
 
@@ -63,7 +72,10 @@ export async function api(path: string, options: RequestInit = {}): Promise<any>
 
   // Auto-refresh on 401
   if (res.status === 401 && tokens?.refresh_token) {
-    const newToken = await refreshTokens();
+    if (!_refreshPromise) {
+      _refreshPromise = refreshTokens().finally(() => { _refreshPromise = null; });
+    }
+    const newToken = await _refreshPromise;
     if (newToken) {
       headers["Authorization"] = `Bearer ${newToken}`;
       res = await fetch(`${API}${path}`, { ...options, headers });
@@ -87,6 +99,8 @@ type WSHandler = (event: any) => void;
 
 let _ws: WebSocket | null = null;
 let _handlers: WSHandler[] = [];
+let _wsRetries = 0;
+const WS_MAX_RETRIES = 10;
 
 export function connectWS() {
   const tokens = getTokens();
@@ -95,6 +109,10 @@ export function connectWS() {
   const wsUrl = API.replace("http", "ws");
   _ws = new WebSocket(`${wsUrl}/ws?token=${tokens.access_token}`);
 
+  _ws.onopen = () => {
+    _wsRetries = 0;
+  };
+
   _ws.onmessage = (e) => {
     const data = JSON.parse(e.data);
     _handlers.forEach((h) => h(data));
@@ -102,8 +120,11 @@ export function connectWS() {
 
   _ws.onclose = () => {
     _ws = null;
-    // Reconnect after 3s
-    setTimeout(connectWS, 3000);
+    if (_wsRetries < WS_MAX_RETRIES) {
+      const delay = Math.min(3000 * Math.pow(1.5, _wsRetries), 30000);
+      _wsRetries++;
+      setTimeout(() => connectWS(), delay);
+    }
   };
 }
 
@@ -166,15 +187,69 @@ export function getTgWebApp() {
   return typeof window !== "undefined" ? window.Telegram?.WebApp : undefined;
 }
 
-export async function tgAuth(): Promise<boolean> {
+export async function ssoAuth(postforgeToken: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API}/api/auth/sso`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ postforge_token: postforgeToken }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    saveTokens(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface TgWorkspace {
+  org_id: string;
+  name: string;
+  role: string;
+}
+
+export type TgAuthResult =
+  | { ok: true; workspaces?: undefined }
+  | { ok: false; workspaces?: undefined }
+  | { ok: false; workspaces: TgWorkspace[] };
+
+export async function tgAuth(): Promise<TgAuthResult> {
   const initData = getTgInitData();
-  if (!initData) return false;
+  if (!initData) return { ok: false };
 
   try {
     const res = await fetch(`${API}/api/auth/tg`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ init_data: initData }),
+    });
+
+    if (!res.ok) return { ok: false };
+
+    const data = await res.json();
+
+    // Multi-workspace: backend returned workspace list instead of tokens
+    if (data.workspaces) {
+      return { ok: false, workspaces: data.workspaces };
+    }
+
+    saveTokens(data);
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function tgSelectWorkspace(orgId: string): Promise<boolean> {
+  const initData = getTgInitData();
+  if (!initData) return false;
+
+  try {
+    const res = await fetch(`${API}/api/auth/tg/select`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ init_data: initData, org_id: orgId }),
     });
 
     if (!res.ok) return false;
@@ -208,6 +283,7 @@ export interface Contact {
   notes: string | null;
   assigned_to: string | null;
   tg_account_id: string | null;
+  is_archived: boolean;
   created_at: string;
   approved_at: string | null;
   last_message_at: string | null;
@@ -309,3 +385,140 @@ export async function pressInlineButton(contactId: string, messageId: string, ca
     body: JSON.stringify({ message_id: messageId, callback_data: callbackData }),
   });
 }
+
+// ============================================================
+// Templates
+// ============================================================
+
+export interface Template {
+  id: string;
+  title: string;
+  content: string;
+  category: string | null;
+  shortcut: string | null;
+  media_path: string | null;
+  media_type: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export async function getTemplates(): Promise<Template[]> {
+  return api("/api/templates");
+}
+
+export async function createTemplate(data: { title: string; content: string; category?: string; shortcut?: string }) {
+  return api("/api/templates", { method: "POST", body: JSON.stringify(data) });
+}
+
+export async function updateTemplate(id: string, data: Partial<Template>) {
+  return api(`/api/templates/${id}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+
+export async function deleteTemplate(id: string) {
+  return api(`/api/templates/${id}`, { method: "DELETE" });
+}
+
+// ============================================================
+// Archive
+// ============================================================
+
+export async function archiveContact(contactId: string) {
+  return api(`/api/contacts/${contactId}/archive`, { method: "POST" });
+}
+
+export async function unarchiveContact(contactId: string) {
+  return api(`/api/contacts/${contactId}/unarchive`, { method: "POST" });
+}
+
+// ============================================================
+// Avatars
+// ============================================================
+
+export function avatarUrl(contactId: string): string {
+  const tokens = getTokens();
+  return `${API}/api/contacts/${contactId}/avatar?token=${tokens?.access_token || ""}`;
+}
+
+// ============================================================
+// Message editing
+// ============================================================
+
+export async function editMessage(contactId: string, messageId: string, content: string) {
+  return api(`/api/messages/${contactId}/${messageId}/edit`, {
+    method: "PATCH",
+    body: JSON.stringify({ content }),
+  });
+}
+
+// ============================================================
+// Translation
+// ============================================================
+
+export async function translateText(text: string, targetLang: string = "en"): Promise<{ translated: string; detected_lang: string }> {
+  return api("/api/translate", {
+    method: "POST",
+    body: JSON.stringify({ text, target_lang: targetLang }),
+  });
+}
+
+// ============================================================
+// Broadcasts
+// ============================================================
+
+export interface Broadcast {
+  id: string;
+  title: string;
+  content: string | null;
+  media_path: string | null;
+  media_type: string | null;
+  tg_account_id: string;
+  tag_filter: string[];
+  max_recipients: number | null;
+  contact_ids: string[];
+  delay_seconds: number;
+  status: string;
+  total_recipients: number;
+  sent_count: number;
+  failed_count: number;
+  created_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export async function getBroadcasts(): Promise<Broadcast[]> {
+  return api("/api/broadcasts");
+}
+
+export async function createBroadcast(data: {
+  title: string;
+  content?: string;
+  tg_account_id: string;
+  tag_filter?: string[];
+  delay_seconds?: number;
+  max_recipients?: number;
+  contact_ids?: string[];
+}) {
+  return api("/api/broadcasts", { method: "POST", body: JSON.stringify(data) });
+}
+
+export async function startBroadcast(id: string) {
+  return api(`/api/broadcasts/${id}/start`, { method: "POST" });
+}
+
+export async function pauseBroadcast(id: string) {
+  return api(`/api/broadcasts/${id}/pause`, { method: "POST" });
+}
+
+export async function cancelBroadcast(id: string) {
+  return api(`/api/broadcasts/${id}/cancel`, { method: "POST" });
+}
+
+// ============================================================
+// Sync dialogs
+// ============================================================
+
+export async function syncDialogs(accountId: string, limit: number = 50) {
+  return api(`/api/tg/${accountId}/sync-dialogs?limit=${limit}`, { method: "POST" });
+}
+
