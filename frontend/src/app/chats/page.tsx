@@ -13,6 +13,7 @@ import {
   getTemplates,
   mediaUrl,
   onWSEvent,
+  isKeyboardHidden,
   parseInlineButtons,
   pressInlineButton,
   translateText,
@@ -65,7 +66,8 @@ function ChatsContent() {
   const [selectedAccount, setSelectedAccount] = useState("");
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
-  const isAdmin = ["super_admin", "admin"].includes(getRole() || "");
+  const [role, setRole] = useState(getRole() || "operator");
+  const isAdmin = ["super_admin", "admin"].includes(role);
 
   // Add member to group
   const [showAddMember, setShowAddMember] = useState(false);
@@ -130,6 +132,10 @@ function ChatsContent() {
     api("/api/unread").then((data: Record<string, number>) => {
       setUnread(new Map(Object.entries(data)));
     }).catch(console.error);
+  }, []);
+  // Sync role from server (in case localStorage is stale)
+  useEffect(() => {
+    api("/api/staff/me").then((me: any) => { if (me?.role) setRole(me.role); }).catch(() => {});
   }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { api("/api/tags").then(setAllTags).catch(console.error); }, []);
@@ -209,14 +215,17 @@ function ChatsContent() {
     return unsub;
   }, []);
 
+  const [loadingMessages, setLoadingMessages] = useState(false);
   useEffect(() => {
     if (!selected) return;
     setActiveTopic(null);
     setTopics([]);
+    setMessages([]);
+    setLoadingMessages(true);
     api(`/api/messages/${selected.id}?limit=100`).then((msgs: Message[]) => {
       setMessages(msgs);
       setTimeout(() => messagesEndRef.current?.scrollIntoView(), 50);
-    }).catch(console.error);
+    }).catch(console.error).finally(() => setLoadingMessages(false));
     // Load topics for forum supergroups
     if (selected.is_forum) {
       api(`/api/messages/${selected.id}/topics`).then(setTopics).catch(console.error);
@@ -591,7 +600,7 @@ function ChatsContent() {
                   : "hover:bg-surface-hover border-l-2 border-l-transparent"
               }`}
             >
-              <div className="flex items-center justify-between">
+              <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2 min-w-0">
                   {/* Avatar */}
                   {!avatarErrors.has(c.id) ? (
@@ -622,41 +631,50 @@ function ChatsContent() {
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-col items-end gap-1 shrink-0">
                   {c.last_message_at && (
                     <span className={`text-xs ${unread.has(c.id) ? "text-brand font-medium" : "text-slate-500"}`}>
-                      {new Date(c.last_message_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      {(() => {
+                        const d = new Date(c.last_message_at);
+                        const now = new Date();
+                        const isToday = d.toDateString() === now.toDateString();
+                        return isToday
+                          ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                          : d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+                      })()}
                     </span>
                   )}
-                  <button
+                  <div className="flex items-center gap-1">
+                    <button
                       onClick={(e) => { e.stopPropagation(); togglePin(c.id); }}
-                      className={`transition-colors p-1 ${pinned.has(c.id) ? "text-brand" : "text-slate-600 hover:text-brand"}`}
+                      className={`transition-colors p-0.5 ${pinned.has(c.id) ? "text-brand" : "text-slate-600 hover:text-brand"}`}
                       title={pinned.has(c.id) ? "Unpin" : "Pin"}
                     >
                       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={pinned.has(c.id) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M12 17v5" /><path d="M9 2h6l-1 7h4l-7 8 1-5H8l1-10z" />
                       </svg>
                     </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleArchive(c.id); }}
-                    className="text-slate-600 hover:text-amber-400 transition-colors p-1"
-                    title={c.is_archived ? "Разархивировать" : "Архивировать"}
-                  >
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={c.is_archived ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" />
-                    </svg>
-                  </button>
-                  {isAdmin && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); deleteContact(c.id); }}
-                      className="text-slate-600 hover:text-red-400 transition-colors p-1 -mr-1"
-                      title="Удалить из CRM"
+                      onClick={(e) => { e.stopPropagation(); handleArchive(c.id); }}
+                      className="text-slate-600 hover:text-amber-400 transition-colors p-0.5"
+                      title={c.is_archived ? "Разархивировать" : "Архивировать"}
                     >
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={c.is_archived ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" />
                       </svg>
                     </button>
-                  )}
+                    {isAdmin && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteContact(c.id); }}
+                        className="text-slate-600 hover:text-red-400 transition-colors p-0.5 -mr-1"
+                        title="Удалить из CRM"
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
               {c.tags.length > 0 && (
@@ -685,8 +703,8 @@ function ChatsContent() {
         {selected ? (
           <>
             {/* Header */}
-            <div className="px-3 py-2.5 border-b border-surface-border bg-surface-card/30 backdrop-blur-sm flex items-center gap-2 overflow-x-auto">
-              <button onClick={() => setSelected(null)} className="md:hidden text-slate-400 hover:text-white transition-colors p-1">
+            <div className="px-2 py-1.5 md:px-3 md:py-2.5 border-b border-surface-border bg-surface-card/30 backdrop-blur-sm flex items-center gap-1.5 md:gap-2 shrink-0">
+              <button onClick={() => setSelected(null)} className="md:hidden text-slate-400 hover:text-white transition-colors p-0.5">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="15 18 9 12 15 6" />
                 </svg>
@@ -704,88 +722,62 @@ function ChatsContent() {
                       className="bg-surface-card border border-brand/30 rounded-lg px-2.5 py-1 text-sm focus:outline-none focus:border-brand/50"
                       autoFocus
                     />
-                    <button onClick={renameContact} className="text-accent text-sm font-medium hover:text-accent/80 transition-colors">Save</button>
-                    <button onClick={() => setEditingAlias(false)} className="text-slate-500 text-sm hover:text-slate-300 transition-colors">Cancel</button>
+                    <button onClick={renameContact} className="text-accent text-sm font-medium hover:text-accent/80 transition-colors">OK</button>
+                    <button onClick={() => setEditingAlias(false)} className="text-slate-500 text-sm hover:text-slate-300 transition-colors">✕</button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     {isGroup && (
-                      <svg className="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg className="w-3.5 h-3.5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
                         <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
                       </svg>
                     )}
-                    <div>
+                    <div className="min-w-0">
                       <div
-                        className="font-semibold cursor-pointer hover:text-brand transition-colors truncate"
+                        className="font-semibold text-sm cursor-pointer hover:text-brand transition-colors truncate"
                         onClick={() => { setAliasValue(selected.alias); setEditingAlias(true); }}
                         title="Click to rename"
                       >
                         {selected.alias}
                       </div>
-                      {selected.chat_type !== "private" && (
-                        <div className="text-[10px] text-slate-500">
-                          {selected.chat_type === "supergroup" ? (selected.is_forum ? "Форум" : "Супергруппа") : selected.chat_type === "channel" ? "Канал" : "Группа"}
-                        </div>
-                      )}
+                      <div className="text-[10px] text-slate-500 flex items-center gap-1.5 truncate">
+                        <span title="Telegram ID">ID: {selected.real_tg_id || "—"}</span>
+                        {selected.created_at && <span>с {new Date(selected.created_at).toLocaleDateString("ru-RU")}</span>}
+                      </div>
                     </div>
                   </div>
                 )}
-                <div className="flex gap-1 mt-1 items-center flex-wrap">
-                  {selected.tags.map((t) => {
-                    const tagInfo = allTags.find((at) => at.name === t);
-                    return <Badge key={t} text={t} color={tagInfo?.color} />;
-                  })}
-                  <button
-                    onClick={() => setShowTags(!showTags)}
-                    className={`w-5 h-5 flex items-center justify-center rounded-full text-xs border transition-all duration-200 ${
-                      showTags
-                        ? "bg-brand/20 border-brand/30 text-brand"
-                        : "border-surface-border text-slate-500 hover:text-brand hover:border-brand/30"
-                    }`}
-                    title="Manage tags"
-                  >
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" strokeLinecap="round" strokeLinejoin="round" />
-                      <line x1="7" y1="7" x2="7.01" y2="7" />
-                    </svg>
-                  </button>
-                </div>
-                {showTags && (
-                  <div className="flex gap-1.5 mt-2 flex-wrap animate-slide-up">
-                    {allTags.map((tag) => (
-                      <button
-                        key={tag.id}
-                        onClick={() => toggleTag(tag.name)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${
-                          selected.tags.includes(tag.name)
-                            ? "border-transparent shadow-sm"
-                            : "border-surface-border opacity-40 hover:opacity-80"
-                        }`}
-                        style={{ backgroundColor: tag.color + "25", color: tag.color, borderColor: selected.tags.includes(tag.name) ? tag.color + "40" : undefined }}
-                      >
-                        {selected.tags.includes(tag.name) ? "- " : "+ "}{tag.name}
-                      </button>
-                    ))}
-                    {allTags.length === 0 && (
-                      <span className="text-xs text-slate-500">No tags yet. Create them in Settings.</span>
-                    )}
-                  </div>
-                )}
               </div>
+
+              {/* Tags toggle */}
+              <button
+                onClick={() => setShowTags(!showTags)}
+                className={`p-1.5 rounded-lg border transition-all duration-200 shrink-0 ${
+                  showTags || selected.tags.length > 0
+                    ? "bg-brand/10 border-brand/30 text-brand"
+                    : "border-surface-border text-slate-500 hover:text-brand hover:border-brand/30"
+                }`}
+                title="Теги"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" strokeLinecap="round" strokeLinejoin="round" />
+                  <line x1="7" y1="7" x2="7.01" y2="7" />
+                </svg>
+              </button>
 
               {/* Add member (groups only) */}
               {isGroup && isAdmin && (
                 <button
                   onClick={() => setShowAddMember(!showAddMember)}
-                  className={`p-2 rounded-xl border transition-all duration-200 ${
+                  className={`p-1.5 rounded-lg border transition-all duration-200 shrink-0 ${
                     showAddMember
                       ? "bg-brand/10 border-brand/30 text-brand"
                       : "border-surface-border text-slate-500 hover:text-brand hover:border-brand/30"
                   }`}
-                  title="Add member"
+                  title="Добавить участника"
                 >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="8.5" cy="7" r="4" />
                     <line x1="20" y1="8" x2="20" y2="14" /><line x1="23" y1="11" x2="17" y2="11" />
                   </svg>
@@ -797,58 +789,94 @@ function ChatsContent() {
                 value={translateLangIn}
                 onChange={(e) => setTranslateLangIn(e.target.value)}
                 className="hidden md:block px-2 py-1.5 rounded-xl border border-surface-border bg-surface-card text-xs text-slate-400 focus:outline-none focus:border-brand/30 cursor-pointer shrink-0"
-                title="Перевод входящих"
+                title="Язык перевода входящих"
               >
-                <option value="ru">🔽 RU</option>
-                <option value="en">🔽 EN</option>
-                <option value="es">🔽 ES</option>
-                <option value="de">🔽 DE</option>
-                <option value="fr">🔽 FR</option>
-                <option value="zh">🔽 ZH</option>
-                <option value="ar">🔽 AR</option>
-                <option value="pt">🔽 PT</option>
-                <option value="ja">🔽 JA</option>
-                <option value="ko">🔽 KO</option>
-                <option value="uk">🔽 UK</option>
-                <option value="tr">🔽 TR</option>
+                <option value="ru">↓ RU</option>
+                <option value="en">↓ EN</option>
+                <option value="es">↓ ES</option>
+                <option value="de">↓ DE</option>
+                <option value="fr">↓ FR</option>
+                <option value="zh">↓ ZH</option>
+                <option value="ar">↓ AR</option>
+                <option value="pt">↓ PT</option>
+                <option value="ja">↓ JA</option>
+                <option value="ko">↓ KO</option>
+                <option value="uk">↓ UK</option>
+                <option value="tr">↓ TR</option>
               </select>
               <select
                 value={translateLangOut}
                 onChange={(e) => setTranslateLangOut(e.target.value)}
                 className="hidden md:block px-2 py-1.5 rounded-xl border border-surface-border bg-surface-card text-xs text-slate-400 focus:outline-none focus:border-brand/30 cursor-pointer shrink-0"
-                title="Перевод исходящих"
+                title="Язык перевода исходящих"
               >
-                <option value="en">🔼 EN</option>
-                <option value="ru">🔼 RU</option>
-                <option value="es">🔼 ES</option>
-                <option value="de">🔼 DE</option>
-                <option value="fr">🔼 FR</option>
-                <option value="zh">🔼 ZH</option>
-                <option value="ar">🔼 AR</option>
-                <option value="pt">🔼 PT</option>
-                <option value="ja">🔼 JA</option>
-                <option value="ko">🔼 KO</option>
-                <option value="uk">🔼 UK</option>
-                <option value="tr">🔼 TR</option>
+                <option value="en">↑ EN</option>
+                <option value="ru">↑ RU</option>
+                <option value="es">↑ ES</option>
+                <option value="de">↑ DE</option>
+                <option value="fr">↑ FR</option>
+                <option value="zh">↑ ZH</option>
+                <option value="ar">↑ AR</option>
+                <option value="pt">↑ PT</option>
+                <option value="ja">↑ JA</option>
+                <option value="ko">↑ KO</option>
+                <option value="uk">↑ UK</option>
+                <option value="tr">↑ TR</option>
               </select>
 
               {/* Forward mode toggle */}
               <button
                 onClick={() => { setForwardMode(!forwardMode); setForwardSelected(new Set()); }}
-                className={`p-2 rounded-xl border transition-all duration-200 ${
+                className={`p-1.5 rounded-lg border transition-all duration-200 shrink-0 ${
                   forwardMode
                     ? "bg-brand/10 border-brand/30 text-brand"
                     : "border-surface-border text-slate-500 hover:text-brand hover:border-brand/30"
                 }`}
-                title={forwardMode ? "Cancel forward" : "Forward messages"}
+                title={forwardMode ? "Отмена" : "Переслать"}
               >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
                   <polyline points="14 8 18 12 14 16" />
                   <line x1="10" y1="12" x2="18" y2="12" />
                 </svg>
               </button>
             </div>
+
+            {/* Tags bar — expandable below header */}
+            {(showTags || selected.tags.length > 0) && (
+              <div className="px-3 py-1.5 border-b border-surface-border/50 bg-surface/50 shrink-0">
+                <div className="flex gap-1 items-center flex-wrap">
+                  {selected.tags.map((t) => {
+                    const tagInfo = allTags.find((at) => at.name === t);
+                    return <Badge key={t} text={t} color={tagInfo?.color} />;
+                  })}
+                  {selected.tags.length === 0 && !showTags && (
+                    <span className="text-[10px] text-slate-600">нет тегов</span>
+                  )}
+                </div>
+                {showTags && (
+                  <div className="flex gap-1.5 mt-1.5 flex-wrap animate-slide-up">
+                    {allTags.map((tag) => (
+                      <button
+                        key={tag.id}
+                        onClick={() => toggleTag(tag.name)}
+                        className={`px-2 py-0.5 rounded-full text-[11px] font-medium border transition-all duration-200 ${
+                          selected.tags.includes(tag.name)
+                            ? "border-transparent shadow-sm"
+                            : "border-surface-border opacity-40 hover:opacity-80"
+                        }`}
+                        style={{ backgroundColor: tag.color + "25", color: tag.color, borderColor: selected.tags.includes(tag.name) ? tag.color + "40" : undefined }}
+                      >
+                        {selected.tags.includes(tag.name) ? "- " : "+ "}{tag.name}
+                      </button>
+                    ))}
+                    {allTags.length === 0 && (
+                      <span className="text-xs text-slate-500">Тегов нет. Создайте в Настройках.</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Add member bar */}
             {showAddMember && (
@@ -932,9 +960,9 @@ function ChatsContent() {
                 setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 300);
               }}
             >
-              {loadingTopic && (
+              {(loadingMessages || loadingTopic) && (
                 <div className="flex items-center justify-center py-8">
-                  <div className="w-6 h-6 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+                  <div className="w-6 h-6 border-2 border-brand/30 border-t-brand rounded-full animate-spin" />
                   <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
                 </div>
               )}
@@ -1155,6 +1183,26 @@ function ChatsContent() {
                                         window.open(btn.url, "_blank");
                                       } else if (btn.callback_data) {
                                         handlePressButton(m.id, btn.callback_data);
+                                      } else if (btn.send_text && selected) {
+                                        const tempId = `temp-${Date.now()}`;
+                                        setMessages((prev) => [...prev, {
+                                          id: tempId, contact_id: selected.id, tg_message_id: null,
+                                          direction: "outgoing", content: btn.send_text!, media_type: null,
+                                          media_path: null, sent_by: null, is_read: false, is_edited: false,
+                                          is_deleted: false, inline_buttons: null, reply_to_msg_id: null,
+                                          reply_to_content_preview: null, forwarded_from_alias: null,
+                                          sender_alias: null, topic_id: null, topic_name: null,
+                                          created_at: new Date().toISOString(),
+                                        } as any]);
+                                        api(`/api/messages/${selected.id}/send`, {
+                                          method: "POST",
+                                          body: JSON.stringify({ content: btn.send_text }),
+                                        }).then((msg) => {
+                                          setMessages((prev) => prev.map((m) => m.id === tempId ? msg : m));
+                                        }).catch((e: any) => {
+                                          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+                                          alert(e.message);
+                                        });
                                       }
                                     }}
                                     className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-brand/10 border border-brand/20 text-brand hover:bg-brand/20 transition-all min-h-[36px]"
@@ -1272,8 +1320,66 @@ function ChatsContent() {
               </div>
             )}
 
+            {/* Reply keyboard (persistent bot buttons) */}
+            {(() => {
+              // Find last reply keyboard, but check if it was hidden after
+              let lastKb: any = null;
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const m = messages[i];
+                if (isKeyboardHidden(m.inline_buttons)) break; // keyboard was hidden
+                const btns = parseInlineButtons(m.inline_buttons);
+                if (btns.length > 0 && btns.some((row) => row.some((b) => b.send_text))) {
+                  lastKb = m;
+                  break;
+                }
+              }
+              if (!lastKb) return null;
+              const kbButtons = parseInlineButtons(lastKb.inline_buttons);
+              return (
+                <div className="px-2 py-1.5 border-t border-surface-border/50 bg-surface/80 shrink-0">
+                  <div className="space-y-1">
+                    {kbButtons.map((row, ri) => (
+                      <div key={ri} className="flex gap-1">
+                        {row.map((btn, bi) => (
+                          <button
+                            key={bi}
+                            onClick={() => {
+                              if (!selected) return;
+                              const tempId = `temp-${Date.now()}`;
+                              const sendText = btn.send_text || btn.text;
+                              setMessages((prev) => [...prev, {
+                                id: tempId, contact_id: selected.id, tg_message_id: null,
+                                direction: "outgoing", content: sendText, media_type: null,
+                                media_path: null, sent_by: null, is_read: false, is_edited: false,
+                                is_deleted: false, inline_buttons: null, reply_to_msg_id: null,
+                                reply_to_content_preview: null, forwarded_from_alias: null,
+                                sender_alias: null, topic_id: null, topic_name: null,
+                                created_at: new Date().toISOString(),
+                              } as any]);
+                              api(`/api/messages/${selected.id}/send`, {
+                                method: "POST",
+                                body: JSON.stringify({ content: sendText }),
+                              }).then((msg) => {
+                                setMessages((prev) => prev.map((m) => m.id === tempId ? msg : m));
+                              }).catch((e: any) => {
+                                setMessages((prev) => prev.filter((m) => m.id !== tempId));
+                                alert(e.message);
+                              });
+                            }}
+                            className="flex-1 px-2 py-2 text-xs font-medium rounded-xl bg-surface-card border border-surface-border text-slate-300 hover:border-brand/30 hover:text-brand transition-all active:scale-95"
+                          >
+                            {btn.text}
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Input */}
-            <div className="p-3 border-t border-surface-border bg-surface-card/30 backdrop-blur-sm" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0.75rem))' }}>
+            <div className="p-2 md:p-3 border-t border-surface-border bg-surface-card/30 backdrop-blur-sm shrink-0" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom, 0.5rem))' }}>
               <div className="flex gap-1 items-center bg-surface-card border border-surface-border rounded-2xl px-1">
                 <input
                   ref={fileInputRef}

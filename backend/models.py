@@ -209,6 +209,7 @@ class MessageTemplate(Base):
     shortcut = Column(String, nullable=True)  # e.g. "/hello" trigger
     media_path = Column(String, nullable=True)
     media_type = Column(String, nullable=True)  # photo | video | video_note | voice | document
+    tg_account_id = Column(UUID(as_uuid=True), ForeignKey("tg_accounts.id"), nullable=True, index=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)
     org_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=func.now())

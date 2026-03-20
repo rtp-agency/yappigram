@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, clearTokens, getTemplates, createTemplate, deleteTemplate, syncDialogs, getRole } from "@/lib";
+import { api, clearTokens, getTemplates, createTemplate, deleteTemplate, deleteTag, syncDialogs, getRole } from "@/lib";
 import type { Template } from "@/lib";
 import { AppShell, AuthGuard, Button, Input } from "@/components";
 import { useRouter } from "next/navigation";
@@ -36,7 +36,7 @@ function SettingsContent() {
 
 function WorkspaceSection() {
   const router = useRouter();
-  const [wsName, setWsName] = useState("");
+  const [wsName, setWsName] = useState("Команда");
 
   useEffect(() => {
     api("/api/staff/me")
@@ -198,6 +198,13 @@ function TagsSection() {
     } catch (e: any) { alert(e.message); }
   };
 
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteTag(id);
+      setTags((prev) => prev.filter((t) => t.id !== id));
+    } catch (e: any) { alert(e.message); }
+  };
+
   return (
     <section className="animate-fade-in">
       <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
@@ -211,10 +218,19 @@ function TagsSection() {
         {tags.map((t) => (
           <span
             key={t.id}
-            className="px-3 py-1.5 rounded-full text-sm font-medium border animate-fade-in"
+            className="group relative px-3 py-1.5 rounded-full text-sm font-medium border animate-fade-in"
             style={{ backgroundColor: t.color + "15", color: t.color, borderColor: t.color + "30" }}
           >
             {t.name}
+            <button
+              onClick={() => handleDelete(t.id)}
+              className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/20"
+              style={{ color: "inherit" }}
+            >
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
           </span>
         ))}
         {tags.length === 0 && <span className="text-sm text-slate-500">Тегов пока нет</span>}
@@ -238,25 +254,38 @@ function TagsSection() {
 
 function TemplatesSection() {
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [accounts, setAccounts] = useState<{ id: string; phone: string }[]>([]);
+  const [filterAccount, setFilterAccount] = useState<string | "all">("all");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [category, setCategory] = useState("");
   const [shortcut, setShortcut] = useState("");
+  const [assignAccount, setAssignAccount] = useState("");
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [sendAs, setSendAs] = useState("auto");
 
   useEffect(() => {
     getTemplates().then(setTemplates).catch(console.error);
+    api("/api/tg/status").then((accs: any[]) => {
+      setAccounts(accs.map((a: any) => ({ id: a.id, phone: a.phone })));
+    }).catch(() => {});
   }, []);
 
+  const filteredTemplates = filterAccount === "all"
+    ? templates
+    : templates.filter((t) => t.tg_account_id === filterAccount);
+
+  const [creating, setCreating] = useState(false);
   const handleCreate = async () => {
-    if (!title.trim() || !content.trim()) return;
+    if (!title.trim() || !content.trim() || creating) return;
+    setCreating(true);
     try {
       let tpl = await createTemplate({
         title: title.trim(),
         content: content.trim(),
         category: category.trim() || undefined,
         shortcut: shortcut.trim() || undefined,
+        tg_account_id: assignAccount || undefined,
       });
       // Upload media if selected
       if (mediaFile) {
@@ -272,7 +301,7 @@ function TemplatesSection() {
       setTemplates((prev) => [...prev, tpl]);
       setTitle(""); setContent(""); setCategory(""); setShortcut("");
       setMediaFile(null); setSendAs("auto");
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { alert(e.message); } finally { setCreating(false); }
   };
 
   const handleDelete = async (id: string) => {
@@ -293,8 +322,31 @@ function TemplatesSection() {
         Шаблоны ответов
       </h2>
 
+      {/* Filter by account */}
+      <div className="flex gap-1 mb-4 bg-surface border border-surface-border rounded-xl p-1 w-fit flex-wrap">
+        <button
+          onClick={() => setFilterAccount("all")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            filterAccount === "all" ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
+          }`}
+        >
+          Все
+        </button>
+        {accounts.map((acc) => (
+          <button
+            key={acc.id}
+            onClick={() => setFilterAccount(acc.id)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              filterAccount === acc.id ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
+            }`}
+          >
+            {acc.phone}
+          </button>
+        ))}
+      </div>
+
       <div className="space-y-2 mb-4">
-        {templates.map((tpl) => (
+        {filteredTemplates.map((tpl) => (
           <div key={tpl.id} className="bg-surface-card border border-surface-border rounded-xl p-3 flex items-start justify-between gap-3 animate-fade-in">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 mb-1">
@@ -306,6 +358,14 @@ function TemplatesSection() {
                 )}
                 {tpl.category && <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-hover text-slate-400">{tpl.category}</span>}
                 {tpl.shortcut && <span className="text-[10px] text-slate-500 font-mono">{tpl.shortcut}</span>}
+                {tpl.tg_account_id && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
+                    {accounts.find((a) => a.id === tpl.tg_account_id)?.phone || "—"}
+                  </span>
+                )}
+                {tpl.created_by_name && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-hover text-slate-500">{tpl.created_by_name}</span>
+                )}
               </div>
               <p className="text-xs text-slate-400 break-words">{tpl.content.slice(0, 150)}{tpl.content.length > 150 ? "..." : ""}</p>
             </div>
@@ -316,7 +376,7 @@ function TemplatesSection() {
             </button>
           </div>
         ))}
-        {templates.length === 0 && <span className="text-sm text-slate-500">Шаблонов пока нет</span>}
+        {filteredTemplates.length === 0 && <span className="text-sm text-slate-500">Шаблонов пока нет</span>}
       </div>
 
       <div className="bg-gradient-to-br from-surface-card to-surface border border-surface-border rounded-2xl p-5 space-y-3">
@@ -334,7 +394,22 @@ function TemplatesSection() {
             className="w-full bg-surface border border-surface-border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-brand/50 resize-none"
           />
         </div>
-        <Input label="Шорткат (необязательно)" value={shortcut} onChange={setShortcut} placeholder="/hello" />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Шорткат (необязательно)" value={shortcut} onChange={setShortcut} placeholder="/hello" />
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm text-slate-400 font-medium">Аккаунт</label>
+            <select
+              value={assignAccount}
+              onChange={(e) => setAssignAccount(e.target.value)}
+              className="bg-surface-card border border-surface-border rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand/50 transition-all duration-200 text-slate-300"
+            >
+              <option value="">Общий (все аккаунты)</option>
+              {accounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>{acc.phone}</option>
+              ))}
+            </select>
+          </div>
+        </div>
 
         {/* Media upload */}
         <div>
@@ -371,7 +446,7 @@ function TemplatesSection() {
           </div>
         </div>
 
-        <Button onClick={handleCreate} disabled={!title.trim() || !content.trim()}>Создать шаблон</Button>
+        <Button onClick={handleCreate} disabled={!title.trim() || !content.trim() || creating}>{creating ? "Создание..." : "Создать шаблон"}</Button>
       </div>
     </section>
   );

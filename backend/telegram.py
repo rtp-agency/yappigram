@@ -105,10 +105,10 @@ async def start_connect(phone: str) -> dict:
         settings.TG_API_HASH,
     )
     await client.connect()
-    log.info(f"connected, is_authorized={await client.is_user_authorized()}")
+    print(f"[TG_CONNECT] connected, is_authorized={await client.is_user_authorized()}", flush=True)
     try:
         result = await client.send_code_request(phone, force_sms=True)
-        log.info(f"send_code_request OK: type={type(result.type).__name__}, phone_code_hash={result.phone_code_hash[:8]}...")
+        print(f"[TG_CONNECT] send_code OK: type={type(result.type).__name__}, hash={result.phone_code_hash[:8]}...", flush=True)
         # Disconnect previous pending client for same phone
         import time
         if phone in _pending_auth:
@@ -118,7 +118,7 @@ async def start_connect(phone: str) -> dict:
         _pending_auth[phone] = (client, time.time())
         return {"type": type(result.type).__name__, "hash": result.phone_code_hash[:8]}
     except Exception as e:
-        log.error(f"send_code_request FAILED: {type(e).__name__}: {e}")
+        print(f"[TG_CONNECT] FAILED: {type(e).__name__}: {e}", flush=True)
         await client.disconnect()
         raise
 
@@ -175,21 +175,33 @@ def _extract_media(msg_obj) -> tuple[str | None, str | None]:
 
 
 def _extract_inline_buttons(msg_obj) -> str | None:
-    """Serialize inline keyboard buttons from a Telethon message to JSON."""
+    """Serialize inline/reply keyboard buttons from a Telethon message to JSON."""
     import base64 as b64
-    if not msg_obj.reply_markup or not hasattr(msg_obj.reply_markup, "rows"):
+    from telethon.tl.types import ReplyInlineMarkup, ReplyKeyboardMarkup, ReplyKeyboardHide
+    if not msg_obj.reply_markup:
+        return None
+    # Keyboard removal marker
+    if isinstance(msg_obj.reply_markup, ReplyKeyboardHide):
+        return json.dumps({"hide_keyboard": True})
+    if not hasattr(msg_obj.reply_markup, "rows"):
         return None
     try:
+        is_inline = isinstance(msg_obj.reply_markup, ReplyInlineMarkup)
+        is_reply_kb = isinstance(msg_obj.reply_markup, ReplyKeyboardMarkup)
+        if not is_inline and not is_reply_kb:
+            return None
         rows = []
         for row in msg_obj.reply_markup.rows:
             btn_row = []
             for btn in row.buttons:
                 btn_data = {"text": btn.text}
                 if hasattr(btn, "data") and btn.data:
-                    # Store as base64 to preserve binary callback data
                     btn_data["callback_data"] = b64.b64encode(btn.data).decode("ascii")
                 elif hasattr(btn, "url") and btn.url:
                     btn_data["url"] = btn.url
+                elif is_reply_kb:
+                    # ReplyKeyboard buttons send text as message
+                    btn_data["send_text"] = btn.text
                 btn_row.append(btn_data)
             rows.append(btn_row)
         return json.dumps(rows) if rows else None
@@ -208,6 +220,9 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
         chat = await event.get_chat()
         if not chat:
             return
+
+        # Wait for CRM API to finish saving the message (avoid duplicate)
+        await asyncio.sleep(1.5)
 
         is_group = event.is_group or event.is_channel
         peer_tg_id = event.chat_id

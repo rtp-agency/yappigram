@@ -106,8 +106,10 @@ export function connectWS() {
   const tokens = getTokens();
   if (!tokens?.access_token || _ws) return;
 
-  const wsUrl = API.replace("http", "ws");
-  _ws = new WebSocket(`${wsUrl}/ws?token=${tokens.access_token}`);
+  const wsBase = API
+    ? API.replace("http", "ws")
+    : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
+  _ws = new WebSocket(`${wsBase}/ws?token=${tokens.access_token}`);
 
   _ws.onopen = () => {
     _wsRetries = 0;
@@ -283,6 +285,7 @@ export interface Contact {
   notes: string | null;
   assigned_to: string | null;
   tg_account_id: string | null;
+  real_tg_id: number | null;
   is_archived: boolean;
   created_at: string;
   approved_at: string | null;
@@ -315,11 +318,24 @@ export interface InlineButton {
   text: string;
   callback_data?: string;
   url?: string;
+  send_text?: string;
 }
 
 export function parseInlineButtons(json: string | null): InlineButton[][] {
   if (!json) return [];
-  try { return JSON.parse(json); } catch { return []; }
+  try {
+    const parsed = JSON.parse(json);
+    if (parsed.hide_keyboard) return [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+export function isKeyboardHidden(json: string | null): boolean {
+  if (!json) return false;
+  try {
+    const parsed = JSON.parse(json);
+    return parsed.hide_keyboard === true;
+  } catch { return false; }
 }
 
 export function mediaUrl(media_path: string): string {
@@ -366,6 +382,10 @@ export interface Tag {
   color: string;
 }
 
+export async function deleteTag(id: string) {
+  return api(`/api/tags/${id}`, { method: "DELETE" });
+}
+
 export interface TgAccount {
   id: string;
   phone: string;
@@ -399,7 +419,9 @@ export interface Template {
   shortcut: string | null;
   media_path: string | null;
   media_type: string | null;
+  tg_account_id: string | null;
   created_by: string | null;
+  created_by_name: string | null;
   created_at: string;
 }
 
@@ -407,7 +429,7 @@ export async function getTemplates(): Promise<Template[]> {
   return api("/api/templates");
 }
 
-export async function createTemplate(data: { title: string; content: string; category?: string; shortcut?: string }) {
+export async function createTemplate(data: { title: string; content: string; category?: string; shortcut?: string; tg_account_id?: string }) {
   return api("/api/templates", { method: "POST", body: JSON.stringify(data) });
 }
 

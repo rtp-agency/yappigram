@@ -85,6 +85,7 @@ class ContactOut(BaseModel):
     notes: str | None
     assigned_to: UUID | None
     tg_account_id: UUID | None
+    real_tg_id: int | None = None
     is_archived: bool = False
     created_at: datetime
     approved_at: datetime | None
@@ -190,6 +191,7 @@ class TemplateCreate(BaseModel):
     content: str
     category: str | None = None
     shortcut: str | None = None
+    tg_account_id: UUID | None = None
 
 class TemplateUpdate(BaseModel):
     title: str | None = None
@@ -205,7 +207,9 @@ class TemplateOut(BaseModel):
     shortcut: str | None = None
     media_path: str | None = None
     media_type: str | None = None
+    tg_account_id: UUID | None = None
     created_by: UUID | None = None
+    created_by_name: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

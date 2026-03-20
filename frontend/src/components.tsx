@@ -91,7 +91,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [isTg, setIsTg] = useState(false);
+  const [isEmbedded, setIsEmbedded] = useState(false);
   const [isOrgTeam, setIsOrgTeam] = useState(false);
+
+  // Init client-side state
+  useEffect(() => {
+    // Detect iframe embedding
+    try { setIsEmbedded(window.self !== window.top); } catch { setIsEmbedded(true); }
+    // Restore cached org team status
+    try {
+      if (sessionStorage.getItem("crm_is_org_team") === "1") setIsOrgTeam(true);
+    } catch {}
+  }, []);
 
   // Fetch current user to check if they're in an organization (not personal workspace)
   useEffect(() => {
@@ -99,9 +110,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (!tokens) return;
     api("/api/staff/me")
       .then((data: any) => {
-        if (data?.postforge_org_id && !data.postforge_org_id.startsWith("personal_")) {
-          setIsOrgTeam(true);
-        }
+        const isOrg = !!(data?.postforge_org_id && !data.postforge_org_id.startsWith("personal_"));
+        setIsOrgTeam(isOrg);
+        try { sessionStorage.setItem("crm_is_org_team", isOrg ? "1" : "0"); } catch {}
       })
       .catch(() => {});
   }, []);
@@ -185,21 +196,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </div>
-          <button
-            onClick={logout}
-            className="flex items-center gap-2 text-sm text-slate-500 hover:text-red-400 transition-colors mt-auto px-3 py-2"
-          >
-            <IconLogout className="w-4 h-4" />
-            Выход
-          </button>
+          {!isEmbedded && (
+            <button
+              onClick={logout}
+              className="flex items-center gap-2 text-sm text-slate-500 hover:text-red-400 transition-colors mt-auto px-3 py-2"
+            >
+              <IconLogout className="w-4 h-4" />
+              Выход
+            </button>
+          )}
         </nav>
       )}
 
-      {/* Main content — pb for mobile bottom nav */}
-      <main className="flex-1 min-h-0 overflow-auto pb-16 md:pb-0">{children}</main>
+      {/* Main content — pb for bottom nav */}
+      <main className={`flex-1 min-h-0 overflow-auto pb-16 ${isTg ? "" : "md:pb-0"}`}>{children}</main>
 
-      {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-card/95 backdrop-blur-lg border-t border-surface-border flex justify-around pt-2 z-50" style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}>
+      {/* Bottom nav — always visible in TG Mini App, mobile-only otherwise */}
+      <nav className={`${isTg ? "" : "md:hidden"} fixed bottom-0 left-0 right-0 bg-surface-card/95 backdrop-blur-lg border-t border-surface-border flex justify-around pt-2 z-50`} style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}>
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = pathname.startsWith(item.href);

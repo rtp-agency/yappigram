@@ -1464,6 +1464,24 @@ async def create_tag(req: TagCreate, user: AdminUser, db: DB):
     return tag
 
 
+@app.delete("/api/tags/{tag_id}")
+async def delete_tag(tag_id: UUID, user: AdminUser, db: DB):
+    result = await db.execute(select(Tag).where(Tag.id == tag_id, Tag.org_id == _org_id(user)))
+    tag = result.scalar_one_or_none()
+    if not tag:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    # Remove tag from contacts that have it
+    tag_name = tag.name
+    contacts_result = await db.execute(
+        select(Contact).where(Contact.tags.any(tag_name))
+    )
+    for contact in contacts_result.scalars().all():
+        contact.tags = [t for t in contact.tags if t != tag_name]
+    await db.delete(tag)
+    await db.commit()
+    return {"status": "deleted"}
+
+
 # ============================================================
 # Message Templates
 # ============================================================
@@ -1471,7 +1489,19 @@ async def create_tag(req: TagCreate, user: AdminUser, db: DB):
 @app.get("/api/templates", response_model=list[TemplateOut])
 async def list_templates(user: CurrentUser, db: DB):
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.org_id == _org_id(user)).order_by(MessageTemplate.title))
-    return result.scalars().all()
+    templates = result.scalars().all()
+    # Resolve creator names
+    creator_ids = {t.created_by for t in templates if t.created_by}
+    staff_names: dict = {}
+    if creator_ids:
+        staff_result = await db.execute(select(Staff).where(Staff.id.in_(creator_ids)))
+        staff_names = {s.id: s.name for s in staff_result.scalars().all()}
+    out = []
+    for t in templates:
+        data = TemplateOut.model_validate(t)
+        data.created_by_name = staff_names.get(t.created_by)
+        out.append(data)
+    return out
 
 
 @app.post("/api/templates", response_model=TemplateOut)
@@ -1481,6 +1511,7 @@ async def create_template(req: TemplateCreate, user: AdminUser, db: DB):
         content=req.content,
         category=req.category,
         shortcut=req.shortcut,
+        tg_account_id=req.tg_account_id,
         created_by=user.id,
         org_id=_org_id(user),
     )
@@ -1689,7 +1720,9 @@ async def edit_message(contact_id: UUID, message_id: UUID, req: SendMessage, use
     try:
         await client.edit_message(contact.real_tg_id, msg.tg_message_id, req.content)
     except Exception as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Edit failed: {e}")
+        if "not modified" not in str(e).lower():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Edit failed: {e}")
+        # Content unchanged — just save locally without error
 
     msg.content = req.content
     msg.is_edited = True
