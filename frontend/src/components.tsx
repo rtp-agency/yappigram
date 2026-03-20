@@ -196,7 +196,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </div>
-          {!isEmbedded && (
+          {isEmbedded ? (
+            <button
+              onClick={() => {
+                if (window.parent !== window) {
+                  window.parent.location.href = "/";
+                }
+              }}
+              className="flex items-center gap-2 text-sm text-emerald-400 hover:text-emerald-300 transition-colors mt-auto px-3 py-2"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+              Обратно в дашборд
+            </button>
+          ) : (
             <button
               onClick={logout}
               className="flex items-center gap-2 text-sm text-slate-500 hover:text-red-400 transition-colors mt-auto px-3 py-2"
