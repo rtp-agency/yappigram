@@ -218,9 +218,9 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 select(Contact).where(
                     Contact.real_tg_id == peer_tg_id,
                     Contact.tg_account_id == account.id,
-                )
+                ).limit(1)
             )
-            contact = result.scalar_one_or_none()
+            contact = result.scalars().first()
             if not contact or contact.status != "approved":
                 return
 
@@ -229,9 +229,9 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 select(Message).where(
                     Message.tg_message_id == msg_obj.id,
                     Message.contact_id == contact.id,
-                )
+                ).limit(1)
             )
-            if existing.scalar_one_or_none():
+            if existing.scalars().first():
                 return
 
             # Media
@@ -332,9 +332,9 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 select(Contact).where(
                     Contact.real_tg_id == peer_tg_id,
                     Contact.tg_account_id == account.id,
-                )
+                ).limit(1)
             )
-            contact = result.scalar_one_or_none()
+            contact = result.scalars().first()
 
             is_new_contact = False
             first_name = ""
