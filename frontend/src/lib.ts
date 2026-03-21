@@ -443,10 +443,10 @@ export interface TgAccount {
   connected_at: string;
 }
 
-export async function forwardMessages(fromContactId: string, messageIds: string[], toContactId: string) {
+export async function forwardMessages(fromContactId: string, messageIds: string[], toContactId: string, mediaOnly: boolean = false) {
   return api(`/api/messages/${fromContactId}/forward`, {
     method: "POST",
-    body: JSON.stringify({ message_ids: messageIds, to_contact_id: toContactId }),
+    body: JSON.stringify({ message_ids: messageIds, to_contact_id: toContactId, media_only: mediaOnly }),
   });
 }
 

@@ -1312,6 +1312,7 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
 
     fwd_ids = await forward_message(
         source.tg_account_id, source.real_tg_id, tg_msg_ids, target.real_tg_id,
+        media_only=req.media_only,
     )
 
     # Save forwarded messages in CRM — carry over content + media from source
@@ -1322,7 +1323,7 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
             contact_id=target.id,
             tg_message_id=fwd_tg_id,
             direction="outgoing",
-            content=src.content if src else None,
+            content=None if req.media_only else (src.content if src else None),
             media_type=src.media_type if src else None,
             media_path=src.media_path if src else None,
             sent_by=user.id,

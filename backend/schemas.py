@@ -135,6 +135,7 @@ class SendMessage(BaseModel):
 class ForwardMessage(BaseModel):
     message_ids: list[UUID]
     to_contact_id: UUID
+    media_only: bool = False
 
 class PressButton(BaseModel):
     message_id: UUID

@@ -761,6 +761,7 @@ async def forward_message(
     from_tg_id: int,
     tg_msg_ids: list[int],
     to_tg_id: int,
+    media_only: bool = False,
 ) -> list[int]:
     """Copy messages to another chat without 'Forwarded from' header."""
     client = _clients.get(account_id)
@@ -777,10 +778,11 @@ async def forward_message(
 
             # Re-send as new message (no forward header)
             if orig.media:
+                caption = "" if media_only else (orig.text or "")
                 result = await client.send_file(
-                    to_tg_id, orig.media, caption=orig.text or "",
+                    to_tg_id, orig.media, caption=caption,
                 )
-            elif orig.text:
+            elif orig.text and not media_only:
                 result = await client.send_message(to_tg_id, orig.text)
             else:
                 continue

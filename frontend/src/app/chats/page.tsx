@@ -61,6 +61,7 @@ function ChatsContent() {
   const [forwardMode, setForwardMode] = useState(false);
   const [forwardSelected, setForwardSelected] = useState<Set<string>>(new Set());
   const [showForwardPicker, setShowForwardPicker] = useState(false);
+  const [forwardMediaOnly, setForwardMediaOnly] = useState(false);
 
   // Bot callback toast
   const [botToast, setBotToast] = useState<string | null>(null);
@@ -523,10 +524,11 @@ function ChatsContent() {
   const doForward = async (toContactId: string) => {
     if (!selected || forwardSelected.size === 0) return;
     try {
-      await forwardMessages(selected.id, Array.from(forwardSelected), toContactId);
+      await forwardMessages(selected.id, Array.from(forwardSelected), toContactId, forwardMediaOnly);
       setForwardMode(false);
       setForwardSelected(new Set());
       setShowForwardPicker(false);
+      setForwardMediaOnly(false);
     } catch (e: any) { alert(e.message); }
   };
 
@@ -1607,6 +1609,17 @@ function ChatsContent() {
                     className="w-full px-3 py-2 rounded-xl bg-surface border border-surface-border text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand/40"
                     autoFocus
                   />
+                  {messages.some((m) => forwardSelected.has(m.id) && m.media_path) && (
+                    <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={forwardMediaOnly}
+                        onChange={(e) => setForwardMediaOnly(e.target.checked)}
+                        className="w-4 h-4 rounded border-surface-border accent-brand"
+                      />
+                      Только медиа (без текста)
+                    </label>
+                  )}
                 </div>
                 <div className="flex-1 overflow-auto">
                   {filtered.length === 0 && (
