@@ -154,6 +154,7 @@ class TgVerifyRequest(BaseModel):
 class TgAccountOut(BaseModel):
     id: UUID
     phone: str
+    display_name: str | None = None
     is_active: bool
     connected_at: datetime
     show_real_names: bool = False

@@ -67,6 +67,7 @@ class TgAccount(Base):
     connected_at = Column(DateTime, default=func.now())
     org_id = Column(String, nullable=True, index=True)
 
+    display_name = Column(String, nullable=True)
     show_real_names = Column(Boolean, default=False)
 
     contacts = relationship("Contact", back_populates="tg_account")

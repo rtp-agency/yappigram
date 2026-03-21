@@ -137,6 +137,13 @@ async def verify_code(phone: str, code: str, password_2fa: str | None = None) ->
             raise ValueError("2FA password required")
         await client.sign_in(password=password_2fa)
 
+    # Fetch display name from Telegram
+    me = await client.get_me()
+    display_name = None
+    if me:
+        parts = [getattr(me, "first_name", "") or "", getattr(me, "last_name", "") or ""]
+        display_name = " ".join(p for p in parts if p).strip() or getattr(me, "username", None) or None
+
     # Save to DB (upsert — reactivate if already exists)
     async with async_session() as db:
         result = await db.execute(select(TgAccount).where(TgAccount.phone == phone))
@@ -144,11 +151,13 @@ async def verify_code(phone: str, code: str, password_2fa: str | None = None) ->
         if account:
             account.session_file = _session_path(phone)
             account.is_active = True
+            account.display_name = display_name
         else:
             account = TgAccount(
                 phone=phone,
                 session_file=_session_path(phone),
                 is_active=True,
+                display_name=display_name,
             )
             db.add(account)
         await db.commit()
@@ -834,6 +843,23 @@ async def startup_listeners() -> None:
             authorized = await client.is_user_authorized()
             print(f"[STARTUP] {account.phone} authorized={authorized}")
             if authorized:
+                # Backfill display_name if missing
+                if not account.display_name:
+                    try:
+                        me = await client.get_me()
+                        if me:
+                            parts = [getattr(me, "first_name", "") or "", getattr(me, "last_name", "") or ""]
+                            dn = " ".join(p for p in parts if p).strip() or getattr(me, "username", None) or None
+                            if dn:
+                                async with async_session() as db2:
+                                    res2 = await db2.execute(select(TgAccount).where(TgAccount.id == account.id))
+                                    acc2 = res2.scalar_one_or_none()
+                                    if acc2:
+                                        acc2.display_name = dn
+                                        await db2.commit()
+                                        account.display_name = dn
+                    except Exception as e2:
+                        print(f"[STARTUP] Could not fetch display_name for {account.phone}: {e2}")
                 await _start_listener(account, client)
                 print(f"[STARTUP] Listener started for {account.phone}")
             else:

@@ -425,6 +425,7 @@ export async function fetchEditHistory(contactId: string, messageId: string): Pr
 export interface TgStatusAccount {
   id: string;
   phone: string;
+  display_name: string | null;
   is_active: boolean;
   connected: boolean;
   show_real_names: boolean;

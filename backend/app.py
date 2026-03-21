@@ -138,8 +138,9 @@ async def on_startup():
                 ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS org_id VARCHAR;
                 -- Tags: tg_account_id
                 ALTER TABLE tags ADD COLUMN IF NOT EXISTS tg_account_id UUID REFERENCES tg_accounts(id);
-                -- TG accounts: show_real_names
+                -- TG accounts: show_real_names, display_name
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
+                ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR;
                 -- Message edit history table
                 CREATE TABLE IF NOT EXISTS message_edit_history (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

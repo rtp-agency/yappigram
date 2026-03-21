@@ -96,8 +96,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // Init client-side state
   useEffect(() => {
-    // Detect iframe embedding
-    try { setIsEmbedded(window.self !== window.top); } catch { setIsEmbedded(true); }
+    // Detect iframe embedding — check multiple signals and persist in sessionStorage
+    let embedded = false;
+    try { embedded = window.self !== window.top || window.parent !== window; } catch { embedded = true; }
+    // Also check URL parameter
+    if (!embedded) {
+      try { embedded = new URLSearchParams(window.location.search).get("embedded") === "1"; } catch {}
+    }
+    // If detected now, persist for future refreshes
+    if (embedded) {
+      try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {}
+    }
+    // Check sessionStorage for persisted value (survives refresh)
+    if (!embedded) {
+      try { embedded = sessionStorage.getItem("crm_is_embedded") === "1"; } catch {}
+    }
+    setIsEmbedded(embedded);
     // Restore cached org team status
     try {
       if (sessionStorage.getItem("crm_is_org_team") === "1") setIsOrgTeam(true);

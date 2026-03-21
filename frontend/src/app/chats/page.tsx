@@ -154,10 +154,15 @@ function ChatsContent() {
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { filterAccountRef.current = filterAccountId; }, [filterAccountId]);
 
-  // Fetch TG accounts for switcher
+  // Fetch TG accounts for switcher — default to first account if none selected
   useEffect(() => {
     fetchTgStatus().then((accs) => {
       setAccountsList(accs);
+      if (accs.length > 1 && !filterAccountId) {
+        const firstId = accs[0].id;
+        setFilterAccountId(firstId);
+        sessionStorage.setItem("crm_selected_account", firstId);
+      }
     }).catch(console.error);
   }, []);
 
@@ -179,11 +184,15 @@ function ChatsContent() {
     fetchTemplates(acctId).then(setTemplates).catch(console.error);
   }, [filterAccountId]);
 
+  // Re-fetch contacts when account filter changes
   useEffect(() => {
     const acctId = filterAccountId || undefined;
     fetchContacts("approved", acctId).then((data: Contact[]) =>
       setContacts(data.sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || "")))
     ).catch(console.error);
+  }, [filterAccountId]);
+
+  useEffect(() => {
     connectWS();
 
     const unsub = onWSEvent((event) => {
@@ -624,16 +633,6 @@ function ChatsContent() {
           {/* Account switcher */}
           {accountsList.length > 1 && (
             <div className="flex gap-1 px-4 pt-2 pb-1 overflow-x-auto flex-nowrap">
-              <button
-                onClick={() => switchAccount(null)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
-                  filterAccountId === null
-                    ? "bg-brand/15 text-brand border border-brand/30"
-                    : "text-slate-400 hover:text-slate-300 border border-transparent"
-                }`}
-              >
-                Все
-              </button>
               {accountsList.map((acc) => (
                 <button
                   key={acc.id}
@@ -644,7 +643,7 @@ function ChatsContent() {
                       : "text-slate-400 hover:text-slate-300 border border-transparent"
                   }`}
                 >
-                  {acc.phone}
+                  {acc.display_name || acc.phone}
                 </button>
               ))}
             </div>
@@ -1237,7 +1236,7 @@ function ChatsContent() {
                                 if (!confirm("Удалить сообщение?")) return;
                                 try {
                                   await api(`/api/messages/${selected!.id}/delete/${m.id}`, { method: "DELETE" });
-                                  setMessages((prev) => prev.map((msg) => msg.id === m.id ? { ...msg, is_deleted: true, content: "" } : msg));
+                                  setMessages((prev) => prev.map((msg) => msg.id === m.id ? { ...msg, is_deleted: true } : msg));
                                 } catch {}
                               }}
                               className="hover:text-red-400 transition-colors"
