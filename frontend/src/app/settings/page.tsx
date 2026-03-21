@@ -362,28 +362,30 @@ function TemplatesSection({ isAdmin }: { isAdmin: boolean }) {
         Шаблоны ответов
       </h2>
 
-      {/* Filter by account */}
-      <div className="flex gap-1 mb-4 bg-surface border border-surface-border rounded-xl p-1 w-fit flex-wrap">
-        <button
-          onClick={() => setFilterAccount("all")}
-          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-            filterAccount === "all" ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
-          }`}
-        >
-          Все
-        </button>
-        {accounts.map((acc) => (
+      {/* Filter by account — only for admins */}
+      {isAdmin && accounts.length > 1 && (
+        <div className="flex gap-1 mb-4 bg-surface border border-surface-border rounded-xl p-1 w-fit flex-wrap">
           <button
-            key={acc.id}
-            onClick={() => setFilterAccount(acc.id)}
+            onClick={() => setFilterAccount("all")}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              filterAccount === acc.id ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
+              filterAccount === "all" ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
             }`}
           >
-            {acc.phone}
+            Все
           </button>
-        ))}
-      </div>
+          {accounts.map((acc) => (
+            <button
+              key={acc.id}
+              onClick={() => setFilterAccount(acc.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                filterAccount === acc.id ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
+              }`}
+            >
+              {acc.phone}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="space-y-2 mb-4">
         {filteredTemplates.map((tpl) => (

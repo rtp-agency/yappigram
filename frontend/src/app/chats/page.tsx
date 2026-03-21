@@ -1095,11 +1095,11 @@ function ChatsContent() {
                       <div
                         id={`msg-${m.id}`}
                         className={`px-3.5 py-2.5 rounded-2xl text-sm overflow-hidden break-words ${
-                          m.is_deleted ? "ring-2 ring-red-500/60 opacity-60" : ""
-                        } ${
-                          m.is_edited && !m.is_deleted ? "ring-2 ring-amber-400/50" : ""
-                        } ${
-                          m.direction === "outgoing"
+                          m.is_deleted
+                            ? "bg-red-500/20 border border-red-500/40 text-red-200 rounded-br-md"
+                            : m.is_edited
+                            ? "bg-amber-500/15 border border-amber-400/40 text-amber-100 rounded-br-md"
+                            : m.direction === "outgoing"
                             ? "bg-gradient-to-br from-brand to-brand-dark text-white rounded-br-md shadow-[0_2px_8px_rgba(14,165,233,0.2)]"
                             : "bg-surface-card border border-surface-border text-white rounded-bl-md"
                         }`}
