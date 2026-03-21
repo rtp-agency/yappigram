@@ -109,7 +109,9 @@ export function connectWS() {
   const wsBase = API
     ? API.replace("http", "ws")
     : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
-  _ws = new WebSocket(`${wsBase}/ws?token=${tokens.access_token}`);
+  // Use pathname base to support basePath deployments (e.g. /crm/ws)
+  const pathBase = typeof window !== "undefined" ? (window.location.pathname.match(/^\/[^/]+/)?.[0] || "") : "";
+  _ws = new WebSocket(`${wsBase}${pathBase}/ws?token=${tokens.access_token}`);
 
   _ws.onopen = () => {
     _wsRetries = 0;
