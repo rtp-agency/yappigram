@@ -100,6 +100,7 @@ function ChatsContent() {
   // Templates
   const [templates, setTemplates] = useState<Template[]>([]);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [tplCategory, setTplCategory] = useState<string | null>(null);
 
   // Tag filter
   const [filterTag, setFilterTag] = useState<string | null>(null);
@@ -385,10 +386,16 @@ function ChatsContent() {
     } finally { sendingRef.current = false; setSending(false); }
   };
 
-  // Apply template: set text and send media if template has it
+  // Apply template: supports scripts (multi-message, split by \n---\n)
   const applyTemplate = async (tpl: Template) => {
     setShowTemplates(false);
-    if (tpl.media_path && tpl.media_type && selected) {
+    if (!selected) return;
+
+    // Check if it's a script (multi-message template)
+    const parts = tpl.content.split("\n---\n").map((s) => s.trim()).filter(Boolean);
+    const isScript = parts.length > 1;
+
+    if (tpl.media_path && tpl.media_type) {
       // Send media from template via backend
       sendingRef.current = true;
       try {
@@ -401,6 +408,28 @@ function ChatsContent() {
         });
       } catch (e: any) { alert(e.message); }
       sendingRef.current = false;
+    } else if (isScript) {
+      // Script mode: send each part as a separate message with small delay
+      sendingRef.current = true;
+      setSending(true);
+      try {
+        for (const part of parts) {
+          const msg = await api(`/api/messages/${selected.id}/send`, {
+            method: "POST",
+            body: JSON.stringify({ content: part }),
+          });
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === msg.id)) return prev;
+            return [...prev, msg];
+          });
+          // Small delay between messages for natural feel
+          if (part !== parts[parts.length - 1]) {
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        }
+      } catch (e: any) { alert(e.message); }
+      sendingRef.current = false;
+      setSending(false);
     } else {
       setText(tpl.content);
       inputRef.current?.focus();
@@ -1384,31 +1413,57 @@ function ChatsContent() {
             )}
 
             {/* Template picker popup */}
-            {showTemplates && templates.length > 0 && (
-              <div className="px-4 py-2 border-t border-surface-border bg-surface-card/50 max-h-40 overflow-auto animate-slide-up">
-                <div className="text-[10px] text-slate-500 mb-1.5 font-medium">Шаблоны {text.startsWith("/") && <span className="text-brand">— введите шорткат и Enter</span>}</div>
-                <div className="space-y-1">
-                  {templates.filter((tpl) => {
-                    // Filter by account: show templates matching selected account or global (null)
-                    if (filterAccountId && tpl.tg_account_id && tpl.tg_account_id !== filterAccountId) return false;
-                    if (!text.startsWith("/")) return true;
-                    const q = text.toLowerCase();
-                    return (tpl.shortcut && tpl.shortcut.toLowerCase().startsWith(q)) || tpl.title.toLowerCase().includes(q.slice(1));
-                  }).map((tpl) => (
-                    <button
-                      key={tpl.id}
-                      onClick={() => applyTemplate(tpl)}
-                      className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-surface-hover transition-colors border border-transparent hover:border-surface-border"
-                    >
-                      <span className="text-brand font-medium">{tpl.title}</span>
-                      {tpl.media_type && <span className="ml-1">{tpl.media_type === "photo" ? "📷" : tpl.media_type === "video" ? "🎬" : tpl.media_type === "video_note" ? "🔵" : tpl.media_type === "voice" ? "🎤" : "📄"}</span>}
-                      {tpl.shortcut && <span className="text-slate-600 ml-1 font-mono">{tpl.shortcut}</span>}
-                      <span className="text-slate-500 ml-2 truncate">{tpl.content.slice(0, 50)}</span>
-                    </button>
-                  ))}
+            {showTemplates && templates.length > 0 && (() => {
+              const acctFiltered = templates.filter((tpl) => {
+                if (filterAccountId && tpl.tg_account_id && tpl.tg_account_id !== filterAccountId) return false;
+                if (!text.startsWith("/")) return true;
+                const q = text.toLowerCase();
+                return (tpl.shortcut && tpl.shortcut.toLowerCase().startsWith(q)) || tpl.title.toLowerCase().includes(q.slice(1));
+              });
+              const categories = [...new Set(acctFiltered.map((t) => t.category).filter(Boolean))] as string[];
+              return (
+                <div className="px-4 py-2 border-t border-surface-border bg-surface-card/50 max-h-48 overflow-auto animate-slide-up">
+                  <div className="text-[10px] text-slate-500 mb-1.5 font-medium flex items-center gap-2 flex-wrap">
+                    <span>Шаблоны</span>
+                    {text.startsWith("/") && <span className="text-brand">— введите шорткат и Enter</span>}
+                  </div>
+                  {categories.length > 0 && (
+                    <div className="flex gap-1 mb-1.5 flex-wrap">
+                      <button
+                        onClick={() => setTplCategory(null)}
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-medium border transition-colors ${!tplCategory ? "bg-brand/20 text-brand border-brand/30" : "text-slate-500 border-surface-border hover:border-slate-600"}`}
+                      >Все</button>
+                      {categories.map((cat) => (
+                        <button
+                          key={cat}
+                          onClick={() => setTplCategory(tplCategory === cat ? null : cat)}
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-medium border transition-colors ${tplCategory === cat ? "bg-brand/20 text-brand border-brand/30" : "text-slate-500 border-surface-border hover:border-slate-600"}`}
+                        >{cat}</button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="space-y-1">
+                    {acctFiltered.filter((tpl) => !tplCategory || tpl.category === tplCategory).map((tpl) => {
+                      const isScript = tpl.content.includes("\n---\n");
+                      return (
+                        <button
+                          key={tpl.id}
+                          onClick={() => applyTemplate(tpl)}
+                          className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-surface-hover transition-colors border border-transparent hover:border-surface-border"
+                        >
+                          <span className="text-brand font-medium">{tpl.title}</span>
+                          {isScript && <span className="ml-1 text-amber-400" title="Скрипт (несколько сообщений)">📜</span>}
+                          {tpl.media_type && <span className="ml-1">{tpl.media_type === "photo" ? "📷" : tpl.media_type === "video" ? "🎬" : tpl.media_type === "video_note" ? "🔵" : tpl.media_type === "voice" ? "🎤" : "📄"}</span>}
+                          {tpl.shortcut && <span className="text-slate-600 ml-1 font-mono">{tpl.shortcut}</span>}
+                          {tpl.category && <span className="text-purple-400/60 ml-1 text-[10px]">{tpl.category}</span>}
+                          <span className="text-slate-500 ml-2 truncate">{tpl.content.slice(0, 50)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Emoji picker popup */}
             {showEmoji && (
