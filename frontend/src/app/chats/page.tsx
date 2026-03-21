@@ -159,7 +159,7 @@ function ChatsContent() {
   useEffect(() => {
     fetchTgStatus().then((accs) => {
       setAccountsList(accs);
-      if (accs.length > 1 && !filterAccountId) {
+      if (accs.length >= 1 && !filterAccountId) {
         const firstId = accs[0].id;
         setFilterAccountId(firstId);
         sessionStorage.setItem("crm_selected_account", firstId);

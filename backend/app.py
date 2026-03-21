@@ -8,6 +8,31 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
+# Allowed file extensions for uploads (security whitelist)
+ALLOWED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",  # images
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",  # video
+    ".mp3", ".ogg", ".opus", ".wav", ".m4a", ".aac",  # audio
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",  # docs
+    ".txt", ".csv", ".json", ".xml", ".zip", ".rar", ".7z",  # other safe
+}
+
+
+def _validate_upload(file: "UploadFile") -> None:
+    """Validate uploaded file extension and content type for security."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext and ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"File type '{ext}' not allowed",
+        )
+    ct = (file.content_type or "").lower()
+    # Block executable content types
+    blocked_ct = {"application/x-executable", "application/x-msdos-program",
+                  "application/x-sh", "application/x-shellscript", "application/x-bat"}
+    if ct in blocked_ct:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Executable files not allowed")
+
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -1169,6 +1194,8 @@ async def send_media(
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
+    _validate_upload(file)
+
     # Determine media type from content type
     ct = file.content_type or ""
     if ct.startswith("image/"):
@@ -1604,6 +1631,8 @@ async def template_upload_media(
     file: UploadFile = File(...),
     send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
 ):
+    _validate_upload(file)
+
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
     tpl = result.scalar_one_or_none()
     if not tpl:
@@ -1873,6 +1902,8 @@ async def broadcast_upload_media(
     file: UploadFile = File(...),
     send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
 ):
+    _validate_upload(file)
+
     result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
     bc = result.scalar_one_or_none()
     if not bc:
