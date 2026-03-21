@@ -91,26 +91,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [isTg, setIsTg] = useState(false);
-  const [isEmbedded, setIsEmbedded] = useState(false);
+  const [isEmbedded, setIsEmbedded] = useState(() => {
+    if (typeof window === "undefined") return false;
+    // Check sessionStorage first (persists across refreshes)
+    try { if (sessionStorage.getItem("crm_is_embedded") === "1") return true; } catch {}
+    return false;
+  });
   const [isOrgTeam, setIsOrgTeam] = useState(false);
 
   // Init client-side state
   useEffect(() => {
-    // Detect iframe embedding — check multiple signals and persist in sessionStorage
+    // Detect iframe embedding
     let embedded = false;
-    try { embedded = window.self !== window.top || window.parent !== window; } catch { embedded = true; }
-    // Also check URL parameter
-    if (!embedded) {
-      try { embedded = new URLSearchParams(window.location.search).get("embedded") === "1"; } catch {}
-    }
-    // If detected now, persist for future refreshes
-    if (embedded) {
-      try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {}
-    }
-    // Check sessionStorage for persisted value (survives refresh)
-    if (!embedded) {
-      try { embedded = sessionStorage.getItem("crm_is_embedded") === "1"; } catch {}
-    }
+    try { embedded = window.self !== window.top; } catch { embedded = true; }
+    if (!embedded) { try { embedded = window.parent !== window; } catch { embedded = true; } }
+    if (!embedded) { try { embedded = new URLSearchParams(window.location.search).get("embedded") === "1"; } catch {} }
+    if (!embedded) { try { embedded = sessionStorage.getItem("crm_is_embedded") === "1"; } catch {} }
+    if (!embedded) { try { embedded = document.referrer.includes("metra-ai.org") && !document.referrer.includes("crm.metra-ai.org"); } catch {} }
+    if (embedded) { try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {} }
     setIsEmbedded(embedded);
     // Restore cached org team status
     try {
@@ -213,8 +211,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {isEmbedded ? (
             <button
               onClick={() => {
-                if (window.parent !== window) {
-                  window.parent.location.href = "/";
+                try { window.parent.location.href = "/"; } catch {
+                  window.location.href = "https://metra-ai.org";
                 }
               }}
               className="flex items-center gap-2 text-sm text-emerald-400 hover:text-emerald-300 transition-colors mt-auto px-3 py-2"
