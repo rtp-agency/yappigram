@@ -550,7 +550,12 @@ async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
 @app.get("/api/tg/status", response_model=list[TgAccountOut])
 async def tg_status(user: CurrentUser, db: DB):
     from telegram import _clients
-    result = await db.execute(select(TgAccount).where(TgAccount.org_id == _org_id(user)))
+    query = select(TgAccount).where(TgAccount.org_id == _org_id(user))
+    # Non-admin users only see accounts assigned to them
+    if user.role not in ("super_admin", "admin"):
+        assigned = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
+        query = query.where(TgAccount.id.in_(assigned))
+    result = await db.execute(query)
     accounts = result.scalars().all()
     out = []
     for acc in accounts:
@@ -1349,7 +1354,6 @@ async def delete_message(contact_id: UUID, message_id: UUID, user: CurrentUser, 
         except Exception:
             pass  # best-effort deletion from TG
     msg.is_deleted = True
-    msg.content = ""
     await db.commit()
     return {"status": "deleted"}
 
