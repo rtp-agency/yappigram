@@ -728,8 +728,8 @@ function ChatsContent() {
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2 min-w-0">
-                  {/* Avatar */}
-                  {!avatarErrors.has(c.id) ? (
+                  {/* Avatar — initials for list, real avatar only for selected chat */}
+                  {selected?.id === c.id && !avatarErrors.has(c.id) ? (
                     <img
                       src={avatarUrl(c.id)}
                       alt=""
