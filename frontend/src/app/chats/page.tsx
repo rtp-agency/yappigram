@@ -235,7 +235,7 @@ function ChatsContent() {
   // Re-fetch contacts when account filter changes
   useEffect(() => {
     const acctId = filterAccountId || undefined;
-    fetchContacts("approved", acctId).then((data: Contact[]) =>
+    fetchContacts(undefined, acctId).then((data: Contact[]) =>
       setContacts(data.sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || "")))
     ).catch(console.error);
   }, [filterAccountId]);
@@ -250,7 +250,7 @@ function ChatsContent() {
           const exists = prev.some((c) => c.id === event.contact_id);
           if (!exists) {
             // New contact — fetch full contact list to get the new one
-            fetchContacts("approved", filterAccountRef.current || undefined).then((data: Contact[]) =>
+            fetchContacts(undefined, filterAccountRef.current || undefined).then((data: Contact[]) =>
               setContacts(data.sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || "")))
             ).catch(console.error);
             return prev;

@@ -90,7 +90,7 @@ class Contact(Base):
 
     # Public data
     alias = Column(String, nullable=False, unique=True)
-    status = Column(String, default="pending")  # pending | approved | blocked
+    status = Column(String, default="approved")  # approved | blocked
 
     # CRM data
     assigned_to = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)

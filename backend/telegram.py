@@ -394,7 +394,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                             alias=generate_alias(group_title, seq),
                             chat_type=chat_type,
                             is_forum=is_forum,
-                            status="pending",
+                            status="approved",
                         )
                     else:
                         contact = Contact(
@@ -404,7 +404,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                             real_username_encrypted=encrypt(username) if username else None,
                             alias=generate_alias(first_name, seq),
                             chat_type="private",
-                            status="pending",
+                            status="approved",
                         )
                     db.add(contact)
                     try:
@@ -527,7 +527,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             if is_new_contact:
                 try:
                     await ws_manager.broadcast_to_admins({
-                        "type": "new_pending",
+                        "type": "new_contact",
                         "contact_id": str(contact.id),
                         "alias": contact.alias,
                     })

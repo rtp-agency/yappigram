@@ -253,6 +253,8 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_contacts_last_message_at ON contacts (last_message_at DESC NULLS LAST);
                 CREATE INDEX IF NOT EXISTS ix_contacts_status ON contacts (status);
                 CREATE INDEX IF NOT EXISTS ix_messages_contact_id ON messages (contact_id);
+                -- Auto-approve all pending contacts (no approval flow)
+                UPDATE contacts SET status = 'approved' WHERE status = 'pending';
             EXCEPTION WHEN OTHERS THEN NULL;
             END $$;
             """)
@@ -728,12 +730,15 @@ async def list_contacts(
     if tg_account_id:
         query = query.where(Contact.tg_account_id == tg_account_id)
 
-    # Operators see contacts from their assigned TG accounts
+    # Operators see contacts from their assigned TG accounts only
     if user.role == "operator":
         sub = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
-        query = query.where(Contact.tg_account_id.in_(sub), Contact.status == "approved")
-    elif status_filter:
+        query = query.where(Contact.tg_account_id.in_(sub))
+    # Filter blocked contacts unless explicitly requested
+    if status_filter:
         query = query.where(Contact.status == status_filter)
+    else:
+        query = query.where(Contact.status != "blocked")
 
     if assigned_to:
         query = query.where(Contact.assigned_to == assigned_to)
