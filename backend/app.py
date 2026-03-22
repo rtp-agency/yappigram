@@ -2558,8 +2558,8 @@ async def update_crm_settings(
 # WebSocket
 # ============================================================
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
+async def _handle_ws(ws: WebSocket, token: str):
+    """Shared WebSocket handler."""
     payload = decode_token(token)
     if payload.get("type") != "access":
         await ws.close(code=4001)
@@ -2585,6 +2585,16 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
         pass
     finally:
         ws_manager.disconnect(staff_id, ws)
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
+    await _handle_ws(ws, token)
+
+
+@app.websocket("/crm/ws")
+async def websocket_endpoint_crm(ws: WebSocket, token: str = Query(...)):
+    await _handle_ws(ws, token)
 
 
 # ============================================================
