@@ -33,6 +33,52 @@ import {
 } from "@/lib";
 import { AppShell, AuthGuard, Badge, Button } from "@/components";
 
+// Lazy avatar: shows initials immediately, loads real avatar when visible in viewport
+function LazyAvatar({ contactId, alias, chatType, hasError, onError }: {
+  contactId: string; alias: string; chatType: string; hasError: boolean; onError: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || hasError) return;
+    const obs = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) { setVisible(true); obs.disconnect(); }
+    }, { rootMargin: "100px" });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [hasError]);
+
+  const isGroup = chatType === "group" || chatType === "channel" || chatType === "supergroup";
+  const initial = alias.charAt(0).toUpperCase();
+
+  return (
+    <div ref={ref} className="w-8 h-8 rounded-full shrink-0 relative">
+      {visible && !hasError && (
+        <img
+          src={avatarUrl(contactId)}
+          alt=""
+          className={`w-8 h-8 rounded-full object-cover absolute inset-0 transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
+          onLoad={() => setLoaded(true)}
+          onError={onError}
+        />
+      )}
+      <div className={`w-8 h-8 rounded-full bg-surface-card border border-surface-border flex items-center justify-center transition-opacity duration-300 ${loaded ? "opacity-0" : "opacity-100"}`}>
+        {isGroup ? (
+          <svg className="w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+          </svg>
+        ) : (
+          <span className="text-xs text-slate-400 font-medium">{initial}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ChatsPage() {
   return (
     <AuthGuard>
@@ -728,28 +774,8 @@ function ChatsContent() {
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2 min-w-0">
-                  {/* Avatar — initials for list, real avatar only for selected chat */}
-                  {selected?.id === c.id && !avatarErrors.has(c.id) ? (
-                    <img
-                      src={avatarUrl(c.id)}
-                      alt=""
-                      className="w-8 h-8 rounded-full object-cover shrink-0 bg-surface-card"
-                      onError={() => setAvatarErrors((prev) => new Set(prev).add(c.id))}
-                    />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-surface-card border border-surface-border flex items-center justify-center shrink-0">
-                      {(c.chat_type === "group" || c.chat_type === "channel" || c.chat_type === "supergroup") ? (
-                        <svg className="w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                          <circle cx="9" cy="7" r="4" />
-                          <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                        </svg>
-                      ) : (
-                        <span className="text-xs text-slate-400 font-medium">{c.alias.charAt(0).toUpperCase()}</span>
-                      )}
-                    </div>
-                  )}
+                  {/* Avatar — lazy loaded with IntersectionObserver */}
+                  <LazyAvatar contactId={c.id} alias={c.alias} chatType={c.chat_type} hasError={avatarErrors.has(c.id)} onError={() => setAvatarErrors((prev) => new Set(prev).add(c.id))} />
                   <span className={`font-medium text-sm truncate ${unread.has(c.id) ? "text-white" : ""}`}>{c.alias}</span>
                   {unread.has(c.id) && (
                     <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-brand text-white text-[11px] font-bold flex items-center justify-center shrink-0">
