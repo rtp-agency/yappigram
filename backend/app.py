@@ -242,6 +242,8 @@ async def on_startup():
                 -- TG accounts: show_real_names, display_name
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR;
+                -- Per-staff timezone
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS timezone VARCHAR DEFAULT 'UTC';
                 -- Message edit history table
                 CREATE TABLE IF NOT EXISTS message_edit_history (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2541,6 +2543,116 @@ async def update_signature_mode(user: CurrentUser, db: DB, mode: str = Query(...
         staff.signature_mode = mode
         await db.commit()
     return {"signature_mode": mode}
+
+
+# ============================================================
+# Staff Timezone
+# ============================================================
+
+VALID_TIMEZONES = {
+    "UTC",
+    "Europe/Moscow", "Europe/Berlin", "Europe/London", "Europe/Paris",
+    "Europe/Istanbul", "Europe/Kiev",
+    "Asia/Dubai", "Asia/Bangkok", "Asia/Singapore", "Asia/Tokyo",
+    "Asia/Shanghai", "Asia/Kolkata",
+    "America/New_York", "America/Chicago", "America/Denver",
+    "America/Los_Angeles", "America/Sao_Paulo",
+    "Pacific/Auckland",
+}
+
+
+@app.patch("/api/staff/me/timezone")
+async def update_timezone(user: CurrentUser, db: DB, timezone: str = Query(...)):
+    """Update current user's timezone."""
+    if timezone not in VALID_TIMEZONES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid timezone: {timezone}")
+    result = await db.execute(select(Staff).where(Staff.id == user.id))
+    staff = result.scalar_one_or_none()
+    if staff:
+        staff.timezone = timezone
+        await db.commit()
+    return {"timezone": timezone}
+
+
+# ============================================================
+# Reports
+# ============================================================
+
+@app.get("/api/reports/new-chats")
+async def report_new_chats(
+    user: CurrentUser,
+    db: DB,
+    from_date: str = Query(..., description="ISO date, e.g. 2026-03-20"),
+    to_date: str = Query(..., description="ISO date, e.g. 2026-03-23"),
+    tg_account_id: UUID | None = Query(None),
+    timezone: str = Query("UTC"),
+):
+    """Report: new chats (contacts) created in a date range, grouped by day and account."""
+    from datetime import date as date_type
+
+    # Validate timezone
+    if timezone not in VALID_TIMEZONES:
+        timezone = "UTC"
+
+    try:
+        start = datetime.fromisoformat(from_date)
+        end = datetime.fromisoformat(to_date).replace(hour=23, minute=59, second=59)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid date format. Use YYYY-MM-DD.")
+
+    org = _org_id(user)
+    org_accounts = select(TgAccount.id).where(TgAccount.org_id == org)
+
+    # Base filter
+    base_filter = [
+        Contact.tg_account_id.in_(org_accounts),
+        Contact.created_at >= start,
+        Contact.created_at <= end,
+    ]
+    if tg_account_id:
+        base_filter.append(Contact.tg_account_id == tg_account_id)
+
+    # Total count
+    total_q = select(func.count(Contact.id)).where(*base_filter)
+    total_result = await db.execute(total_q)
+    total = total_result.scalar() or 0
+
+    # By day — convert created_at to target timezone, then group by date
+    day_expr = func.date(Contact.created_at.op("AT TIME ZONE")("UTC").op("AT TIME ZONE")(timezone))
+    by_day_q = (
+        select(day_expr.label("day"), func.count(Contact.id).label("cnt"))
+        .where(*base_filter)
+        .group_by(day_expr)
+        .order_by(day_expr)
+    )
+    by_day_result = await db.execute(by_day_q)
+    by_day = [{"date": str(row.day), "count": row.cnt} for row in by_day_result.all()]
+
+    # By account
+    by_account_q = (
+        select(
+            TgAccount.id.label("account_id"),
+            TgAccount.phone,
+            TgAccount.display_name,
+            func.count(Contact.id).label("cnt"),
+        )
+        .join(TgAccount, Contact.tg_account_id == TgAccount.id)
+        .where(*base_filter)
+        .group_by(TgAccount.id, TgAccount.phone, TgAccount.display_name)
+        .order_by(func.count(Contact.id).desc())
+    )
+    by_account_result = await db.execute(by_account_q)
+    by_account = [
+        {
+            "account_id": str(row.account_id),
+            "phone": row.phone,
+            "display_name": row.display_name,
+            "count": row.cnt,
+        }
+        for row in by_account_result.all()
+    ]
+
+    return {"total": total, "by_day": by_day, "by_account": by_account}
 
 
 # ============================================================

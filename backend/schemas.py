@@ -47,6 +47,7 @@ class StaffOut(BaseModel):
     name: str
     is_active: bool
     signature_mode: str = "named"
+    timezone: str | None = "UTC"
     postforge_org_id: str | None = None
     created_at: datetime
 

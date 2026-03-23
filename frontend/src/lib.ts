@@ -598,3 +598,33 @@ export async function syncDialogs(accountId: string) {
   return api(`/api/tg/${accountId}/sync-dialogs`, { method: "POST" });
 }
 
+// ============================================================
+// Staff Timezone
+// ============================================================
+
+export async function updateTimezone(timezone: string) {
+  return api(`/api/staff/me/timezone?timezone=${encodeURIComponent(timezone)}`, { method: "PATCH" });
+}
+
+// ============================================================
+// Reports
+// ============================================================
+
+export interface NewChatsReport {
+  total: number;
+  by_day: { date: string; count: number }[];
+  by_account: { account_id: string; phone: string; display_name: string | null; count: number }[];
+}
+
+export async function fetchNewChatsReport(
+  fromDate: string,
+  toDate: string,
+  tgAccountId?: string,
+  timezone?: string,
+): Promise<NewChatsReport> {
+  const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
+  if (tgAccountId) params.set("tg_account_id", tgAccountId);
+  if (timezone) params.set("timezone", timezone);
+  return api(`/api/reports/new-chats?${params.toString()}`);
+}
+

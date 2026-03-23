@@ -51,6 +51,9 @@ class Staff(Base):
     # Signature: "named" (shows staff name) or "anonymous" (hides)
     signature_mode = Column(String, default="named")
 
+    # Per-staff timezone (IANA, e.g. "Europe/Moscow")
+    timezone = Column(String, default="UTC")
+
     # Admin setting: show real contact names to operators (default: aliases only)
     show_real_names = Column(Boolean, default=False)
 
