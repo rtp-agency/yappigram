@@ -2353,7 +2353,7 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 50) -> int:
             result = await db.execute(
                 select(Contact).where(Contact.tg_account_id == account_id, Contact.real_tg_id == peer_id)
             )
-            if result.scalar_one_or_none():
+            if result.scalars().first():
                 continue
 
             # Determine chat type
