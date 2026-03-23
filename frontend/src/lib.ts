@@ -594,7 +594,7 @@ export async function cancelBroadcast(id: string) {
 // Sync dialogs
 // ============================================================
 
-export async function syncDialogs(accountId: string, limit: number = 50) {
-  return api(`/api/tg/${accountId}/sync-dialogs?limit=${limit}`, { method: "POST" });
+export async function syncDialogs(accountId: string) {
+  return api(`/api/tg/${accountId}/sync-dialogs`, { method: "POST" });
 }
 

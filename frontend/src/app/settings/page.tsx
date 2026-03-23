@@ -154,13 +154,6 @@ function TelegramSection() {
           </div>
           {acc.is_active && (
             <div className="flex gap-2 mt-3 flex-wrap">
-              <Button
-                variant="secondary"
-                onClick={() => handleSync(acc.id)}
-                disabled={syncing === acc.id}
-              >
-                {syncing === acc.id ? "..." : "Загрузить диалоги"}
-              </Button>
               <Button variant="danger" onClick={() => disconnect(acc.id)}>Отключить</Button>
             </div>
           )}

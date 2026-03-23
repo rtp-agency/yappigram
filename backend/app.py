@@ -648,8 +648,8 @@ async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
     if tg_acc:
         tg_acc.org_id = _org_id(user)
         await db.commit()
-    # Auto-sync dialogs in background after connecting
-    asyncio.create_task(_do_sync_dialogs(account.id, 50))
+    # Auto-sync ALL dialogs in background after connecting
+    asyncio.create_task(_do_sync_dialogs(account.id, None))
     return account
 
 
@@ -2301,7 +2301,7 @@ async def _run_broadcast(broadcast_id: UUID):
 # ============================================================
 
 async def _auto_sync_on_startup():
-    """Auto-sync dialogs for all connected accounts that have no contacts yet."""
+    """Auto-sync ALL dialogs for all connected accounts on every startup."""
     await asyncio.sleep(3)  # Wait for Telethon clients to fully connect
     from telegram import _clients
     async with async_session() as db:
@@ -2310,16 +2310,16 @@ async def _auto_sync_on_startup():
     for account in accounts:
         if account.id not in _clients:
             continue
-        async with async_session() as db:
-            count = await db.execute(
-                select(func.count(Contact.id)).where(Contact.tg_account_id == account.id)
-            )
-            if count.scalar() == 0:
-                print(f"[AUTO-SYNC] No contacts for {account.phone}, starting sync...")
-                await _do_sync_dialogs(account.id, 50)
+        print(f"[AUTO-SYNC] Syncing all dialogs for {account.phone}...")
+        try:
+            imported = await _do_sync_dialogs(account.id, None)  # None = no limit
+            print(f"[AUTO-SYNC] {account.phone}: imported {imported} new dialogs")
+        except Exception as e:
+            print(f"[AUTO-SYNC] {account.phone}: error: {e}")
+        await asyncio.sleep(1)  # Pace between accounts
 
 
-async def _do_sync_dialogs(account_id: UUID, limit: int = 50) -> int:
+async def _do_sync_dialogs(account_id: UUID, limit: int | None = 50) -> int:
     """Background-safe: import dialogs for a TG account. Returns count imported."""
     from telegram import _clients, generate_alias, _extract_media, sanitize_text
     from crypto import encrypt
@@ -2487,19 +2487,22 @@ async def _do_sync_dialogs(account_id: UUID, limit: int = 50) -> int:
                 print(f"[SYNC] Failed to import messages for {peer_id}: {e}")
 
             imported += 1
+            # Small delay to avoid overwhelming DB/Telegram
+            if imported % 10 == 0:
+                await asyncio.sleep(0.5)
 
     print(f"[SYNC] Finished: imported {imported} dialogs for account {account_id}")
     return imported
 
 
 @app.post("/api/tg/{account_id}/sync-dialogs")
-async def sync_old_dialogs(account_id: UUID, user: AdminUser, limit: int = Query(50, le=200)):
-    """Trigger dialog sync as a background task."""
+async def sync_old_dialogs(account_id: UUID, user: AdminUser, db: DB):
+    """Trigger full dialog sync as a background task. Syncs ALL dialogs."""
     from telegram import _clients
     client = _clients.get(account_id)
     if not client:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account not connected")
-    asyncio.create_task(_do_sync_dialogs(account_id, limit))
+    asyncio.create_task(_do_sync_dialogs(account_id, None))  # None = all dialogs
     return {"status": "sync_started"}
 
 
