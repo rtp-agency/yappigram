@@ -658,7 +658,7 @@ async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
         tg_acc.org_id = _org_id(user)
         await db.commit()
     # Auto-sync ALL dialogs in background after connecting
-    asyncio.create_task(_do_sync_dialogs(account.id, None))
+    asyncio.create_task(_do_sync_dialogs(account.id, 500))
     return account
 
 
@@ -2347,14 +2347,14 @@ async def _auto_sync_on_startup():
             continue
         print(f"[AUTO-SYNC] Syncing all dialogs for {account.phone}...")
         try:
-            imported = await _do_sync_dialogs(account.id, None)  # None = no limit
+            imported = await _do_sync_dialogs(account.id, 500)  # None = no limit
             print(f"[AUTO-SYNC] {account.phone}: imported {imported} new dialogs")
         except Exception as e:
             print(f"[AUTO-SYNC] {account.phone}: error: {e}")
         await asyncio.sleep(1)  # Pace between accounts
 
 
-async def _do_sync_dialogs(account_id: UUID, limit: int | None = 50) -> int:
+async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
     """Background-safe: import dialogs for a TG account. Returns count imported."""
     from telegram import _clients, generate_alias, _extract_media, sanitize_text
     from crypto import encrypt
@@ -2537,7 +2537,7 @@ async def sync_old_dialogs(account_id: UUID, user: AdminUser, db: DB):
     client = _clients.get(account_id)
     if not client:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account not connected")
-    asyncio.create_task(_do_sync_dialogs(account_id, None))  # None = all dialogs
+    asyncio.create_task(_do_sync_dialogs(account_id, 500))  # Max 500 dialogs per sync
     return {"status": "sync_started"}
 
 
