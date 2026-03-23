@@ -817,18 +817,19 @@ async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser
     await db.commit()
     await db.refresh(contact)
 
-    # Apply show_real_names / group title resolution (same as GET endpoint)
-    if contact.chat_type != "private":
-        title = decrypt(contact.group_title_encrypted) if contact.group_title_encrypted else None
-        if title:
-            contact.alias = title
-    elif contact.tg_account_id:
-        acct = await db.execute(select(TgAccount.show_real_names).where(TgAccount.id == contact.tg_account_id))
-        show_real = acct.scalar_one_or_none()
-        if show_real:
-            real_name = decrypt(contact.real_name_encrypted) if contact.real_name_encrypted else None
-            if real_name:
-                contact.alias = real_name
+    # Apply show_real_names / group title resolution ONLY if alias wasn't explicitly changed
+    if req.alias is None:
+        if contact.chat_type != "private":
+            title = decrypt(contact.group_title_encrypted) if contact.group_title_encrypted else None
+            if title:
+                contact.alias = title
+        elif contact.tg_account_id:
+            acct = await db.execute(select(TgAccount.show_real_names).where(TgAccount.id == contact.tg_account_id))
+            show_real = acct.scalar_one_or_none()
+            if show_real:
+                real_name = decrypt(contact.real_name_encrypted) if contact.real_name_encrypted else None
+                if real_name:
+                    contact.alias = real_name
 
     return contact
 
