@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, clearTokens, getTemplates, createTemplate, deleteTemplate, deleteTag, syncDialogs, getRole, fetchTgStatus, createTag } from "@/lib";
+import { api, clearTokens, getTemplates, createTemplate, deleteTemplate, deleteTag, getRole, fetchTgStatus, createTag } from "@/lib";
 import type { Template, TgStatusAccount } from "@/lib";
 import { AppShell, AuthGuard, Button, Input } from "@/components";
 import { useRouter } from "next/navigation";
@@ -86,7 +86,6 @@ function TelegramSection() {
   const [password2fa, setPassword2fa] = useState("");
   const [step, setStep] = useState<"idle" | "code_sent">("idle");
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState<string | null>(null);
 
   useEffect(() => {
     api("/api/tg/status").then((res: any) => {
@@ -125,14 +124,6 @@ function TelegramSection() {
     } catch (e: any) { alert(e.message); }
   };
 
-  const handleSync = async (id: string) => {
-    setSyncing(id);
-    try {
-      await syncDialogs(id, 100);
-      alert("Синхронизация запущена. Диалоги появятся в течение минуты.");
-    } catch (e: any) { alert(e.message); }
-    setSyncing(null);
-  };
 
   return (
     <section className="animate-fade-in">
