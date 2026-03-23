@@ -111,6 +111,8 @@ function ChatsContent() {
 
   // Bot callback toast
   const [botToast, setBotToast] = useState<string | null>(null);
+  // User timezone for formatting times
+  const [userTimezone, setUserTimezone] = useState("UTC");
 
   // Create group
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -197,7 +199,7 @@ function ChatsContent() {
   useEffect(() => { api("/api/pinned").then((ids: string[]) => setPinned(new Set(ids))).catch(console.error); }, []);
   // Sync role from server (in case localStorage is stale)
   useEffect(() => {
-    api("/api/staff/me").then((me: any) => { if (me?.role) setRole(me.role); }).catch(() => {});
+    api("/api/staff/me").then((me: any) => { if (me?.role) setRole(me.role); if (me?.timezone) setUserTimezone(me.timezone); }).catch(() => {});
   }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { filterAccountRef.current = filterAccountId; }, [filterAccountId]);
@@ -789,10 +791,12 @@ function ChatsContent() {
                       {(() => {
                         const d = new Date(c.last_message_at);
                         const now = new Date();
-                        const isToday = d.toDateString() === now.toDateString();
+                        const tzNow = new Date(now.toLocaleString("en-US", { timeZone: userTimezone }));
+                        const tzD = new Date(d.toLocaleString("en-US", { timeZone: userTimezone }));
+                        const isToday = tzD.toDateString() === tzNow.toDateString();
                         return isToday
-                          ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-                          : d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+                          ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: userTimezone })
+                          : d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", timeZone: userTimezone });
                       })()}
                     </span>
                   )}
@@ -895,7 +899,7 @@ function ChatsContent() {
                       </div>
                       <div className="text-[10px] text-slate-500 flex items-center gap-1.5 truncate">
                         <span title="Telegram ID">ID: {selected.real_tg_id || "—"}</span>
-                        {selected.created_at && <span>с {new Date(selected.created_at).toLocaleDateString("ru-RU")}</span>}
+                        {selected.created_at && <span>с {new Date(selected.created_at).toLocaleDateString("ru-RU", { timeZone: userTimezone })}</span>}
                       </div>
                     </div>
                   </div>
@@ -1320,7 +1324,7 @@ function ChatsContent() {
                               (ред.)
                             </button>
                           )}
-                          {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: userTimezone })}
                           {m.direction === "outgoing" && (
                             <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                               {m.is_read ? (
