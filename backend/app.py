@@ -1266,10 +1266,13 @@ async def send_msg(contact_id: UUID, req: SendMessage, user: CurrentUser, db: DB
             reply_to_content_preview = preview[:200]
 
     # Send via Telethon
-    tg_msg_id = await send_message(
-        contact.tg_account_id, contact.real_tg_id, req.content,
-        reply_to_tg_msg_id=reply_to_tg_msg_id,
-    )
+    try:
+        tg_msg_id = await send_message(
+            contact.tg_account_id, contact.real_tg_id, req.content,
+            reply_to_tg_msg_id=reply_to_tg_msg_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
 
     msg = Message(
         contact_id=contact.id,
@@ -1329,10 +1332,16 @@ async def send_media(
         f.write(data)
 
     # Send via Telethon
-    tg_msg_id = await send_message(
-        contact.tg_account_id, contact.real_tg_id,
-        text=caption, file_path=filepath,
-    )
+    try:
+        tg_msg_id = await send_message(
+            contact.tg_account_id, contact.real_tg_id,
+            text=caption, file_path=filepath,
+        )
+    except ValueError as e:
+        # Clean up saved file on send failure
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
 
     msg = Message(
         contact_id=contact.id,
@@ -1363,12 +1372,15 @@ async def send_template_media(contact_id: UUID, user: CurrentUser, db: DB, templ
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
 
     file_path = os.path.join(MEDIA_DIR, tpl.media_path) if tpl.media_path else None
-    tg_msg_id = await send_message(
-        contact.tg_account_id, contact.real_tg_id,
-        text=tpl.content or None,
-        file_path=file_path,
-        media_type=tpl.media_type,
-    )
+    try:
+        tg_msg_id = await send_message(
+            contact.tg_account_id, contact.real_tg_id,
+            text=tpl.content or None,
+            file_path=file_path,
+            media_type=tpl.media_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
 
     msg = Message(
         contact_id=contact.id,
