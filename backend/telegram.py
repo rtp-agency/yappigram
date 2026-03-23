@@ -736,6 +736,35 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
     asyncio.create_task(_run_with_reconnect())
 
 
+async def _try_reconnect(account_id: UUID) -> TelegramClient | None:
+    """Try to reconnect a disconnected account and return the client."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(TgAccount).where(TgAccount.id == account_id, TgAccount.is_active.is_(True))
+        )
+        account = result.scalar_one_or_none()
+    if not account:
+        return None
+    try:
+        client = TelegramClient(
+            account.session_file,
+            settings.TG_API_ID,
+            settings.TG_API_HASH,
+        )
+        await client.connect()
+        if await client.is_user_authorized():
+            await _start_listener(account, client)
+            print(f"[RECONNECT] Successfully reconnected {account.phone}")
+            return client
+        else:
+            print(f"[RECONNECT] {account.phone} not authorized")
+            await client.disconnect()
+            return None
+    except Exception as e:
+        print(f"[RECONNECT] Failed for account {account_id}: {e}")
+        return None
+
+
 async def send_message(
     account_id: UUID,
     tg_id: int,
@@ -752,7 +781,9 @@ async def send_message(
     """
     client = _clients.get(account_id)
     if not client:
-        raise ValueError("Telegram account not connected")
+        client = await _try_reconnect(account_id)
+    if not client:
+        raise ValueError("Telegram-аккаунт не подключён. Проверьте подключение в настройках.")
     kwargs = {}
     if reply_to_tg_msg_id:
         kwargs["reply_to"] = reply_to_tg_msg_id
@@ -780,7 +811,9 @@ async def forward_message(
     """Copy messages to another chat without 'Forwarded from' header."""
     client = _clients.get(account_id)
     if not client:
-        raise ValueError("Telegram account not connected")
+        client = await _try_reconnect(account_id)
+    if not client:
+        raise ValueError("Telegram-аккаунт не подключён. Проверьте подключение в настройках.")
 
     sent_ids = []
     for tg_msg_id in tg_msg_ids:
