@@ -123,10 +123,22 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 # --- Rate limiting for auth endpoints ---
 _rate_limits: dict[str, list[float]] = defaultdict(list)
 RATE_LIMIT_WINDOW = 60  # seconds
-RATE_LIMIT_MAX = 10
+RATE_LIMIT_MAX = 30  # per real IP per minute
 
 
-def check_rate_limit(ip: str):
+def _get_real_ip(request) -> str:
+    """Get real client IP from proxy headers."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip", "")
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
+
+
+def check_rate_limit(request):
+    ip = _get_real_ip(request)
     now = time.time()
     _rate_limits[ip] = [t for t in _rate_limits[ip] if now - t < RATE_LIMIT_WINDOW]
     if len(_rate_limits[ip]) >= RATE_LIMIT_MAX:
@@ -327,7 +339,7 @@ async def tg_auth(req: TgAuthRequest, request: Request, db: DB):
     Returns tokens directly if user has one workspace,
     or a list of workspaces to choose from if multiple.
     """
-    check_rate_limit(request.client.host if request.client else "unknown")
+    check_rate_limit(request)
     tg_user = validate_tg_init_data(req.init_data)
     tg_id = tg_user.get("id")
     if not tg_id:
@@ -508,7 +520,7 @@ async def tg_auth_select(req: TgWorkspaceSelect, db: DB):
 
 @app.post("/api/auth/refresh", response_model=TokenResponse)
 async def refresh(req: RefreshRequest, request: Request, db: DB):
-    check_rate_limit(request.client.host if request.client else "unknown")
+    check_rate_limit(request)
     payload = decode_token(req.refresh_token)
     if payload.get("type") != "refresh":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token type")
@@ -532,7 +544,7 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
     Verifies the token against PostForge API, auto-creates Staff if needed.
     Used when CRM is embedded inside PostForge (iframe) or opened from PostForge.
     """
-    check_rate_limit(request.client.host if request.client else "unknown")
+    check_rate_limit(request)
     import httpx
 
     if not settings.POSTFORGE_API_URL:
@@ -637,7 +649,7 @@ MAX_TG_ACCOUNTS = 5  # test version limit
 
 @app.post("/api/tg/connect")
 async def tg_connect(req: TgConnectRequest, request: Request, user: AdminUser, db: DB):
-    check_rate_limit(request.client.host if request.client else "unknown")
+    check_rate_limit(request)
     # Check account limit
     count = await db.execute(
         select(func.count(TgAccount.id)).where(TgAccount.org_id == _org_id(user))
