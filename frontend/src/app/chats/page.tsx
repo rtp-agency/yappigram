@@ -152,21 +152,23 @@ function ChatsContent() {
     return unsub;
   }, []);
 
+  const selectedId = selected?.id ?? null;
+
   useEffect(() => {
-    if (!selected) return;
-    api(`/api/messages/${selected.id}`).then(setMessages).catch(console.error);
+    if (!selectedId) return;
+    api(`/api/messages/${selectedId}`).then(setMessages).catch(console.error);
     setReplyTo(null);
     setForwardMode(false);
     setForwardSelected(new Set());
     // Clear unread for this chat — persist to DB
-    setUnread((prev) => { const n = new Map(prev); n.delete(selected.id); return n; });
-    api(`/api/messages/${selected.id}/read`, { method: "PATCH" }).catch(console.error);
-  }, [selected]);
+    setUnread((prev) => { const n = new Map(prev); n.delete(selectedId); return n; });
+    api(`/api/messages/${selectedId}/read`, { method: "PATCH" }).catch(console.error);
+  }, [selectedId]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selectedId) return;
     const interval = setInterval(() => {
-      api(`/api/messages/${selected.id}`).then((msgs: Message[]) => {
+      api(`/api/messages/${selectedId}`).then((msgs: Message[]) => {
         setMessages((prev) => {
           if (msgs.length !== prev.length || JSON.stringify(msgs.map(m => m.is_deleted)) !== JSON.stringify(prev.map(m => m.is_deleted))) return msgs;
           return prev;
@@ -174,14 +176,14 @@ function ChatsContent() {
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(interval);
-  }, [selected]);
+  }, [selectedId]);
 
   const justOpenedChat = useRef(false);
 
   // When selecting a new chat, flag so first message load scrolls to bottom
   useEffect(() => {
-    if (selected) justOpenedChat.current = true;
-  }, [selected]);
+    if (selectedId) justOpenedChat.current = true;
+  }, [selectedId]);
 
   useEffect(() => {
     const container = messagesContainerRef.current;
