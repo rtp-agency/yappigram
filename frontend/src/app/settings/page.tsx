@@ -117,11 +117,12 @@ function TelegramSection() {
     } catch (e: any) { alert(e.message); } finally { setLoading(false); }
   };
 
+  const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
   const disconnect = async (id: string) => {
-    if (!confirm("Отключить этот аккаунт?")) return;
     try {
       await api(`/api/tg/disconnect/${id}`, { method: "DELETE" });
       setAccounts((prev) => prev.filter((a) => a.id !== id));
+      setConfirmDisconnect(null);
     } catch (e: any) { alert(e.message); }
   };
 
@@ -146,7 +147,14 @@ function TelegramSection() {
           </div>
           {acc.is_active && (
             <div className="flex gap-2 mt-3 flex-wrap">
-              <Button variant="danger" onClick={() => disconnect(acc.id)}>Отключить</Button>
+              {confirmDisconnect === acc.id ? (
+                <div className="flex gap-1">
+                  <Button variant="danger" onClick={() => disconnect(acc.id)}>Да, отключить</Button>
+                  <Button variant="ghost" onClick={() => setConfirmDisconnect(null)}>Отмена</Button>
+                </div>
+              ) : (
+                <Button variant="danger" onClick={() => setConfirmDisconnect(acc.id)}>Отключить</Button>
+              )}
             </div>
           )}
         </div>
