@@ -779,6 +779,28 @@ async def list_contacts(
     )
     show_real_map = {row[0]: row[1] for row in acct_result.all()}
 
+    # Fetch last message content for each contact (batch query)
+    contact_ids = [c.id for c in contacts]
+    last_msg_map: dict = {}
+    if contact_ids:
+        from sqlalchemy import func as sa_func
+        # Subquery: max message id per contact
+        latest_sub = (
+            select(Message.contact_id, sa_func.max(Message.id).label("max_id"))
+            .where(Message.contact_id.in_(contact_ids))
+            .group_by(Message.contact_id)
+            .subquery()
+        )
+        msg_result = await db.execute(
+            select(Message.contact_id, Message.content, Message.media_type)
+            .join(latest_sub, (Message.contact_id == latest_sub.c.contact_id) & (Message.id == latest_sub.c.max_id))
+        )
+        for row in msg_result.all():
+            content = row[1]
+            if not content and row[2]:
+                content = f"[{row[2]}]"
+            last_msg_map[row[0]] = (content or "")[:100]
+
     for c in contacts:
         if c.chat_type != "private":
             # Groups/channels — always show real title
@@ -789,6 +811,7 @@ async def list_contacts(
             real_name = decrypt(c.real_name_encrypted) if c.real_name_encrypted else None
             if real_name:
                 c.alias = real_name
+        c.last_message_content = last_msg_map.get(c.id)
 
     return contacts
 

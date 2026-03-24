@@ -257,8 +257,9 @@ function ChatsContent() {
             ).catch(console.error);
             return prev;
           }
+          const msgPreview = event.message?.content || (event.message?.media_type ? `[${event.message.media_type}]` : "") || "";
           return prev
-            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString() } : c)
+            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100) } : c)
             .sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || ""));
         });
         if (isCurrentChat) {
@@ -775,15 +776,22 @@ function ChatsContent() {
               }`}
             >
               <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
                   {/* Avatar — lazy loaded with IntersectionObserver */}
                   <LazyAvatar contactId={c.id} alias={c.alias} chatType={c.chat_type} hasError={avatarErrors.has(c.id)} onError={() => setAvatarErrors((prev) => new Set(prev).add(c.id))} />
-                  <span className={`font-medium text-sm truncate ${unread.has(c.id) ? "text-white" : ""}`}>{c.alias}</span>
-                  {unread.has(c.id) && (
-                    <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-brand text-white text-[11px] font-bold flex items-center justify-center shrink-0">
-                      {unread.get(c.id)! > 99 ? "99+" : unread.get(c.id)}
-                    </span>
-                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`font-medium text-sm truncate ${unread.has(c.id) ? "text-white" : ""}`}>{c.alias}</span>
+                      {unread.has(c.id) && (
+                        <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-brand text-white text-[11px] font-bold flex items-center justify-center shrink-0">
+                          {unread.get(c.id)! > 99 ? "99+" : unread.get(c.id)}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_message_content && (
+                      <p className="text-xs text-slate-500 truncate mt-0.5">{c.last_message_content}</p>
+                    )}
+                  </div>
                 </div>
                 <div className="flex flex-col items-end gap-1 shrink-0">
                   {c.last_message_at && (
