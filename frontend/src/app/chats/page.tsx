@@ -199,11 +199,15 @@ function ChatsContent() {
   const selectedId = selected?.id ?? null;
 
   useEffect(() => {
-    if (!selectedId) return;
+    if (!selectedId) { setMessages([]); return; }
+    setMessages([]);
+    setTranslations(new Map());
     api(`/api/messages/${selectedId}`).then(setMessages).catch(console.error);
     setReplyTo(null);
     setForwardMode(false);
     setForwardSelected(new Set());
+    setContextMenu(null);
+    setEditingMsg(null);
     // Clear unread for this chat — persist to DB
     setUnread((prev) => { const n = new Map(prev); n.delete(selectedId); return n; });
     api(`/api/messages/${selectedId}/read`, { method: "PATCH" }).catch(console.error);
