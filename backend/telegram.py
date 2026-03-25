@@ -132,6 +132,94 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
     """Register message handler and store client."""
     _clients[account.id] = client
 
+    # Get bot ID + staff IDs to filter out notification loops
+    _bot_id = int(settings.TG_BOT_TOKEN.split(":")[0]) if settings.TG_BOT_TOKEN else None
+    _staff_tg_ids: set[int] = set()
+    try:
+        async with async_session() as _db:
+            from models import Staff
+            _r = await _db.execute(select(Staff.tg_user_id).where(Staff.tg_user_id.isnot(None)))
+            _staff_tg_ids = {row[0] for row in _r.all()}
+    except Exception:
+        pass
+
+    @client.on(events.NewMessage(outgoing=True))
+    async def on_outgoing_message(event):
+        """Capture messages sent directly from Telegram (not through CRM)."""
+        msg_obj = event.message
+        chat = await event.get_chat()
+        if not chat:
+            return
+        peer_tg_id = event.chat_id
+        # Skip messages to bot or operators (prevents notification loops)
+        if _bot_id and peer_tg_id == _bot_id:
+            return
+        if peer_tg_id in _staff_tg_ids:
+            return
+
+        # Wait for CRM API to finish saving (avoid duplicate if sent from CRM)
+        await asyncio.sleep(1.5)
+
+        async with async_session() as db:
+            # Only save if contact exists and is approved
+            result = await db.execute(
+                select(Contact).where(
+                    Contact.real_tg_id == peer_tg_id,
+                    Contact.tg_account_id == account.id,
+                )
+            )
+            contact = result.scalars().first()
+            if not contact or contact.status != "approved":
+                return
+
+            # Skip if already saved (sent through CRM)
+            existing = await db.execute(
+                select(Message).where(
+                    Message.tg_message_id == msg_obj.id,
+                    Message.contact_id == contact.id,
+                )
+            )
+            if existing.scalars().first():
+                return
+
+            # Media
+            media_type, ext = _extract_media(msg_obj)
+            media_path = None
+            if media_type and ext is not None:
+                filename = f"{contact.id}_{msg_obj.id}{ext}"
+                filepath = os.path.join(MEDIA_DIR, filename)
+                actual_path = await msg_obj.download_media(file=filepath)
+                media_path = os.path.basename(actual_path) if actual_path else filename
+
+            sanitized_content = sanitize_text(msg_obj.text)
+            msg = Message(
+                contact_id=contact.id,
+                tg_message_id=msg_obj.id,
+                direction="outgoing",
+                content=sanitized_content,
+                media_type=media_type,
+                media_path=media_path,
+            )
+            db.add(msg)
+            contact.last_message_at = func.now()
+            await db.commit()
+            await db.refresh(msg)
+
+            # Broadcast to CRM
+            await ws_manager.broadcast_to_admins({
+                "type": "new_message",
+                "contact_id": str(contact.id),
+                "message": {
+                    "id": str(msg.id),
+                    "direction": "outgoing",
+                    "content": msg.content,
+                    "media_type": msg.media_type,
+                    "media_path": msg.media_path,
+                    "is_deleted": False,
+                    "created_at": str(msg.created_at),
+                },
+            })
+
     @client.on(events.NewMessage(incoming=True))
     async def on_new_message(event):
         msg_obj = event.message
