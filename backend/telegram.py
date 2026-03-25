@@ -587,6 +587,22 @@ async def send_message(
     return result.id
 
 
+async def edit_message(account_id: UUID, tg_id: int, tg_msg_id: int, new_text: str) -> None:
+    """Edit a message via Telethon."""
+    client = _clients.get(account_id)
+    if not client:
+        raise ValueError("Telegram account not connected")
+    await client.edit_message(tg_id, tg_msg_id, new_text)
+
+
+async def delete_message(account_id: UUID, tg_id: int, tg_msg_ids: list[int]) -> None:
+    """Delete messages via Telethon."""
+    client = _clients.get(account_id)
+    if not client:
+        raise ValueError("Telegram account not connected")
+    await client.delete_messages(tg_id, tg_msg_ids)
+
+
 async def forward_message(
     account_id: UUID,
     from_tg_id: int,

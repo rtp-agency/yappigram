@@ -326,3 +326,17 @@ export async function translateText(text: string, targetLang: string): Promise<s
   });
   return res.translated;
 }
+
+export async function editMessageInTg(contactId: string, messageId: string, content: string) {
+  return api(`/api/messages/${contactId}/edit`, {
+    method: "POST",
+    body: JSON.stringify({ message_id: messageId, content }),
+  });
+}
+
+export async function deleteMessageInTg(contactId: string, messageId: string) {
+  return api(`/api/messages/${contactId}/delete`, {
+    method: "POST",
+    body: JSON.stringify({ message_id: messageId }),
+  });
+}

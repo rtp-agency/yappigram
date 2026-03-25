@@ -50,7 +50,9 @@ from schemas import (
 )
 from telegram import (
     create_group,
+    delete_message,
     disconnect_account,
+    edit_message,
     forward_message,
     press_inline_button,
     send_message,
@@ -694,6 +696,48 @@ async def press_btn(contact_id: UUID, req: PressButton, user: CurrentUser, db: D
         msg.tg_message_id, cb_data,
     )
     return {"status": "ok", "response": response_text}
+
+
+class EditMessageRequest(BaseModel):
+    message_id: UUID
+    content: str
+
+
+class DeleteMessageRequest(BaseModel):
+    message_id: UUID
+
+
+@app.post("/api/messages/{contact_id}/edit")
+async def edit_msg(contact_id: UUID, req: EditMessageRequest, user: CurrentUser, db: DB):
+    """Edit a message in Telegram and update in CRM."""
+    contact = await _get_contact_with_access(contact_id, user, db)
+    rr = await db.execute(select(Message).where(Message.id == req.message_id, Message.contact_id == contact_id))
+    msg = rr.scalar_one_or_none()
+    if not msg or not msg.tg_message_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found")
+    if msg.direction != "outgoing":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Can only edit outgoing messages")
+
+    await edit_message(contact.tg_account_id, contact.real_tg_id, msg.tg_message_id, req.content)
+    msg.content = req.content
+    msg.is_edited = True
+    await db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/messages/{contact_id}/delete")
+async def delete_msg(contact_id: UUID, req: DeleteMessageRequest, user: CurrentUser, db: DB):
+    """Delete a message in Telegram and mark as deleted in CRM."""
+    contact = await _get_contact_with_access(contact_id, user, db)
+    rr = await db.execute(select(Message).where(Message.id == req.message_id, Message.contact_id == contact_id))
+    msg = rr.scalar_one_or_none()
+    if not msg or not msg.tg_message_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found")
+
+    await delete_message(contact.tg_account_id, contact.real_tg_id, [msg.tg_message_id])
+    msg.is_deleted = True
+    await db.commit()
+    return {"status": "ok"}
 
 
 # ============================================================
