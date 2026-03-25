@@ -556,7 +556,7 @@ async def get_messages(
     contact_id: UUID,
     user: CurrentUser,
     db: DB,
-    limit: int = Query(50, le=200),
+    limit: int = Query(100, le=500),
     offset: int = Query(0),
 ):
     await _get_contact_with_access(contact_id, user, db)
