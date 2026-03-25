@@ -92,7 +92,7 @@ function TelegramSection() {
     api("/api/tg/status").then((res: any) => {
       // Support both old format (array) and new format ({ accounts: [...] })
       const accs = Array.isArray(res) ? res : (res.accounts || []);
-      setAccounts(accs);
+      setAccounts(accs.filter((a: any) => a.is_active));
     }).catch(console.error);
   }, []);
 

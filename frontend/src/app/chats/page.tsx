@@ -222,7 +222,8 @@ function ChatsContent() {
 
   // Fetch TG accounts for switcher — default to first account if none selected
   useEffect(() => {
-    fetchTgStatus().then((accs) => {
+    fetchTgStatus().then((rawAccs) => {
+      const accs = rawAccs.filter((a) => a.is_active);
       setAccountsList(accs);
       if (accs.length >= 1 && !filterAccountId) {
         const firstId = accs[0].id;
