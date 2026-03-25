@@ -783,11 +783,16 @@ function ChatsContent() {
                     )}
 
                     <div
-                      className={`max-w-[75%] min-w-0 ${m.direction === "outgoing" ? "ml-auto" : ""}`}
+                      className={`max-w-[75%] min-w-0 select-none ${m.direction === "outgoing" ? "ml-auto" : ""}`}
+                      style={{ WebkitUserSelect: "none", WebkitTouchCallout: "none" }}
                       onDoubleClick={() => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }}
-                      onContextMenu={(e) => { e.preventDefault(); setContextMenu({ msg: m, x: e.clientX, y: e.clientY }); }}
+                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ msg: m, x: e.clientX, y: e.clientY }); }}
                       onTouchStart={(e) => {
-                        const timer = setTimeout(() => { setContextMenu({ msg: m, x: e.touches[0].clientX, y: e.touches[0].clientY }); }, 500);
+                        const x = e.touches[0].clientX, y = e.touches[0].clientY;
+                        const timer = setTimeout(() => {
+                          setContextMenu({ msg: m, x, y });
+                          if (window.getSelection) window.getSelection()?.removeAllRanges();
+                        }, 400);
                         (e.currentTarget as any)._lp = timer;
                       }}
                       onTouchEnd={(e) => { clearTimeout((e.currentTarget as any)._lp); }}
