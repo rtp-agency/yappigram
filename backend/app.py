@@ -2061,11 +2061,15 @@ async def edit_message(contact_id: UUID, message_id: UUID, req: SendMessage, use
     try:
         await client.edit_message(contact.real_tg_id, msg.tg_message_id, req.content)
     except Exception as e:
-        if "not modified" not in str(e).lower():
+        err = str(e).lower()
+        if "not modified" in err:
+            pass  # Content unchanged — save locally without error
+        elif "too much time" in err or "time has passed" in err:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Сообщение слишком старое для редактирования (лимит Telegram — 48 часов)")
+        else:
             import logging
             logging.getLogger(__name__).error(f"Edit failed: {e}")
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Edit failed")
-        # Content unchanged — just save locally without error
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Ошибка редактирования: {str(e)[:100]}")
 
     # Save edit history before updating
     old_content = msg.content
