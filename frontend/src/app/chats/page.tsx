@@ -239,18 +239,10 @@ function ChatsContent() {
     }
   }, [messages]);
 
-  // Auto-translate incoming messages when incomingLang is set
+  // Clear translations when language changes
   useEffect(() => {
-    if (!incomingLang) { setTranslations(new Map()); return; }
-    const toTranslate = messages.filter(
-      (m) => m.direction === "incoming" && m.content && !translations.has(m.id)
-    );
-    toTranslate.forEach((m) => {
-      translateText(m.content!, incomingLang).then((t) => {
-        setTranslations((prev) => new Map(prev).set(m.id, t));
-      }).catch(console.error);
-    });
-  }, [messages, incomingLang]);
+    setTranslations(new Map());
+  }, [incomingLang]);
 
   // Auto-hide bot toast
   useEffect(() => {
@@ -790,6 +782,12 @@ function ChatsContent() {
                       className={`max-w-[75%] min-w-0 ${m.direction === "outgoing" ? "ml-auto" : ""}`}
                       onDoubleClick={() => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }}
                       onContextMenu={(e) => { e.preventDefault(); setContextMenu({ msg: m, x: e.clientX, y: e.clientY }); }}
+                      onTouchStart={(e) => {
+                        const timer = setTimeout(() => { setContextMenu({ msg: m, x: e.touches[0].clientX, y: e.touches[0].clientY }); }, 500);
+                        (e.currentTarget as any)._lp = timer;
+                      }}
+                      onTouchEnd={(e) => { clearTimeout((e.currentTarget as any)._lp); }}
+                      onTouchMove={(e) => { clearTimeout((e.currentTarget as any)._lp); }}
                     >
                       {/* Topic badge for forum supergroups */}
                       {m.topic_id && m.topic_id !== 1 && (
@@ -906,11 +904,23 @@ function ChatsContent() {
                         {/* Content */}
                         {m.content && <span className={`break-words whitespace-pre-wrap [overflow-wrap:anywhere] ${m.is_deleted ? "line-through" : ""}`}>{m.content}</span>}
 
-                        {/* Translated text for incoming messages */}
-                        {m.direction === "incoming" && translations.has(m.id) && (
-                          <div className="mt-1 pt-1 border-t border-slate-600/30 text-xs text-sky-300/80 break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
-                            {translations.get(m.id)}
-                          </div>
+                        {/* Translate button + translated text for incoming */}
+                        {m.direction === "incoming" && m.content && incomingLang && (
+                          translations.has(m.id) ? (
+                            <div className="mt-1 pt-1 border-t border-slate-600/30 text-xs text-sky-300/80 break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
+                              {translations.get(m.id)}
+                            </div>
+                          ) : (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                translateText(m.content!, incomingLang).then((t) => setTranslations((prev) => new Map(prev).set(m.id, t))).catch(() => {});
+                              }}
+                              className="mt-1 text-[10px] text-sky-400/70 hover:text-sky-300 transition-colors"
+                            >
+                              Translate
+                            </button>
+                          )
                         )}
 
                         {/* Timestamp + edited + read status */}
@@ -1016,6 +1026,23 @@ function ChatsContent() {
                     <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                   </svg>
                 </button>
+                {outgoingLang && (
+                  <button
+                    onClick={async () => {
+                      if (!text.trim()) return;
+                      try {
+                        const t = await translateText(text.trim(), outgoingLang);
+                        setText(t);
+                      } catch (e: any) { alert(e.message); }
+                    }}
+                    className="text-sky-400 hover:text-sky-300 transition-colors p-2"
+                    title={`Translate to ${outgoingLang.toUpperCase()}`}
+                  >
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6" />
+                    </svg>
+                  </button>
+                )}
                 <textarea
                   ref={inputRef}
                   value={text}
