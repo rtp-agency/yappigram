@@ -279,8 +279,9 @@ function ChatsContent() {
             return prev;
           }
           const msgPreview = event.message?.content || (event.message?.media_type ? `[${event.message.media_type}]` : "") || "";
+          const msgDir = event.message?.direction || "incoming";
           return prev
-            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100) } : c)
+            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100), last_message_direction: msgDir } : c)
             .sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || ""));
         });
         if (isCurrentChat) {
@@ -524,7 +525,7 @@ function ChatsContent() {
       }
       // Move this chat to top + update last message preview
       setContacts((prev) => prev
-        .map((c: Contact) => c.id === selected.id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: (savedText || "[media]").slice(0, 100) } : c)
+        .map((c: Contact) => c.id === selected.id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: (savedText || "[media]").slice(0, 100), last_message_direction: "outgoing" } : c)
         .sort((a: Contact, b: Contact) => {
           const ap = pinned.has(a.id) ? 1 : 0;
           const bp = pinned.has(b.id) ? 1 : 0;
@@ -892,7 +893,11 @@ function ChatsContent() {
                       )}
                     </div>
                     {c.last_message_content && (
-                      <p className="text-xs text-slate-500 truncate mt-0.5">{c.last_message_content}</p>
+                      <p className={`text-xs truncate mt-0.5 ${
+                        !unread.has(c.id) && c.last_message_direction === "incoming"
+                          ? "text-white font-medium"
+                          : "text-slate-500"
+                      }`}>{c.last_message_content}</p>
                     )}
                   </div>
                 </div>

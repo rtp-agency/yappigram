@@ -798,7 +798,7 @@ async def list_contacts(
             .subquery()
         )
         msg_result = await db.execute(
-            select(Message.contact_id, Message.content, Message.media_type)
+            select(Message.contact_id, Message.content, Message.media_type, Message.direction)
             .join(latest_sub, (Message.contact_id == latest_sub.c.contact_id) & (Message.created_at == latest_sub.c.max_ts))
         )
         for row in msg_result.all():
@@ -808,8 +808,9 @@ async def list_contacts(
             content = row[1]
             if not content and row[2]:
                 content = f"[{row[2]}]"
-            last_msg_map[cid] = (content or "")[:100]
+            last_msg_map[cid] = ((content or "")[:100], row[3])
 
+    last_msg_dir_map: dict = {}
     for c in contacts:
         if c.chat_type != "private":
             # Groups/channels — always show real title
@@ -820,7 +821,13 @@ async def list_contacts(
             real_name = decrypt(c.real_name_encrypted) if c.real_name_encrypted else None
             if real_name:
                 c.alias = real_name
-        c.last_message_content = last_msg_map.get(c.id)
+        entry = last_msg_map.get(c.id)
+        if entry:
+            c.last_message_content = entry[0]
+            c.last_message_direction = entry[1]
+        else:
+            c.last_message_content = None
+            c.last_message_direction = None
 
     return contacts
 

@@ -306,6 +306,7 @@ export interface Contact {
   approved_at: string | null;
   last_message_at: string | null;
   last_message_content: string | null;
+  last_message_direction: string | null;
 }
 
 export interface Message {
