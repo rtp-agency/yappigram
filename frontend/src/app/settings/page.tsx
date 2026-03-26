@@ -284,14 +284,14 @@ function TagsSection() {
               onChange={(e) => setTagAccount(e.target.value)}
               className="bg-surface-card border border-surface-border rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand/50 transition-all duration-200 text-slate-300"
             >
-              <option value="">Общий (все)</option>
+              <option value="">Выберите аккаунт</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>{acc.display_name || acc.phone}</option>
               ))}
             </select>
           </div>
         )}
-        <Button onClick={handleCreate}>Добавить</Button>
+        <Button onClick={handleCreate} disabled={!name.trim() || (accounts.length > 0 && !tagAccount)}>Добавить</Button>
       </div>
     </section>
   );
@@ -300,7 +300,7 @@ function TagsSection() {
 function TemplatesSection({ isAdmin }: { isAdmin: boolean }) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [accounts, setAccounts] = useState<{ id: string; phone: string; display_name: string | null }[]>([]);
-  const [filterAccount, setFilterAccount] = useState<string | "all">("all");
+  const [filterAccount, setFilterAccount] = useState<string | "all">("");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [category, setCategory] = useState("");
@@ -313,13 +313,15 @@ function TemplatesSection({ isAdmin }: { isAdmin: boolean }) {
     getTemplates().then(setTemplates).catch(console.error);
     api("/api/tg/status").then((res: any) => {
       const accs = Array.isArray(res) ? res : (res.accounts || []);
-      setAccounts(accs.map((a: any) => ({ id: a.id, phone: a.phone, display_name: a.display_name || null })));
+      const mapped = accs.map((a: any) => ({ id: a.id, phone: a.phone, display_name: a.display_name || null }));
+      setAccounts(mapped);
+      if (mapped.length > 0 && !filterAccount) setFilterAccount(mapped[0].id);
     }).catch(() => {});
   }, []);
 
-  const filteredTemplates = filterAccount === "all"
+  const filteredTemplates = !filterAccount
     ? templates
-    : templates.filter((t) => t.tg_account_id === filterAccount);
+    : templates.filter((t) => t.tg_account_id === filterAccount || !t.tg_account_id);
 
   const [creating, setCreating] = useState(false);
   const handleCreate = async () => {
@@ -407,14 +409,6 @@ function TemplatesSection({ isAdmin }: { isAdmin: boolean }) {
       {/* Filter by account — only for admins */}
       {isAdmin && accounts.length > 1 && (
         <div className="flex gap-1 mb-4 bg-surface border border-surface-border rounded-xl p-1 w-fit flex-wrap">
-          <button
-            onClick={() => setFilterAccount("all")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              filterAccount === "all" ? "bg-brand/15 text-brand" : "text-slate-400 hover:text-slate-300"
-            }`}
-          >
-            Все
-          </button>
           {accounts.map((acc) => (
             <button
               key={acc.id}
@@ -535,7 +529,7 @@ function TemplatesSection({ isAdmin }: { isAdmin: boolean }) {
                 onChange={(e) => setAssignAccount(e.target.value)}
                 className="bg-surface-card border border-surface-border rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand/50 transition-all duration-200 text-slate-300"
               >
-                <option value="">Общий (все аккаунты)</option>
+                <option value="">Выберите аккаунт</option>
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>{acc.display_name || acc.phone}</option>
                 ))}
@@ -578,7 +572,7 @@ function TemplatesSection({ isAdmin }: { isAdmin: boolean }) {
             </div>
           </div>
 
-          <Button onClick={handleCreate} disabled={!title.trim() || !content.trim() || creating}>{creating ? "Создание..." : "Создать шаблон"}</Button>
+          <Button onClick={handleCreate} disabled={!title.trim() || !content.trim() || creating || (accounts.length > 0 && !assignAccount)}>{creating ? "Создание..." : "Создать шаблон"}</Button>
         </div>
       )}
     </section>
