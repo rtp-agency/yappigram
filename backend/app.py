@@ -263,6 +263,7 @@ async def on_startup():
                 -- TG accounts: show_real_names, display_name
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR;
+                ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS disconnected_at TIMESTAMP;
                 -- Per-staff timezone
                 ALTER TABLE staff ADD COLUMN IF NOT EXISTS timezone VARCHAR DEFAULT 'UTC';
                 -- Message edit history table
@@ -329,6 +330,7 @@ async def on_startup():
     asyncio.create_task(start_bot_polling())
     # Auto-sync dialogs for all connected accounts on startup
     asyncio.create_task(_auto_sync_on_startup())
+    asyncio.create_task(_cleanup_disconnected_accounts())
 
 
 @app.on_event("shutdown")
@@ -688,18 +690,22 @@ async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
 @app.get("/api/tg/status", response_model=list[TgAccountOut])
 async def tg_status(user: CurrentUser, db: DB):
     from telegram import _clients
-    query = select(TgAccount).where(TgAccount.org_id == _org_id(user))
+    query = select(TgAccount).where(TgAccount.org_id == _org_id(user), TgAccount.is_active.is_(True))
     # Non-admin users only see accounts assigned to them
     if user.role not in ("super_admin", "admin"):
         assigned = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
         query = query.where(TgAccount.id.in_(assigned))
     result = await db.execute(query)
     accounts = result.scalars().all()
+    is_operator = user.role not in ("super_admin", "admin")
     out = []
     for acc in accounts:
         d = TgAccountOut.model_validate(acc)
         client = _clients.get(acc.id)
         d.connected = bool(client and client.is_connected())
+        # Operators must not see phone numbers
+        if is_operator:
+            d.phone = "••••" + (acc.phone[-4:] if acc.phone and len(acc.phone) >= 4 else "")
         out.append(d)
     return out
 
@@ -711,24 +717,12 @@ async def tg_disconnect(account_id: UUID, user: CurrentUser, db: DB):
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
-    # Collect contact IDs belonging to this account for cascade deletion
-    contact_rows = await db.execute(select(Contact.id).where(Contact.tg_account_id == account_id))
-    contact_ids = [row[0] for row in contact_rows.all()]
+    # Mark as inactive with timestamp (data kept for 30 days)
+    account.is_active = False
+    account.disconnected_at = datetime.now(timezone.utc)
 
-    if contact_ids:
-        # Delete messages, pinned chats, audit logs, broadcast recipients linked to these contacts
-        await db.execute(sa_delete(Message).where(Message.contact_id.in_(contact_ids)))
-        await db.execute(sa_delete(PinnedChat).where(PinnedChat.contact_id.in_(contact_ids)))
-        await db.execute(sa_delete(AuditLog).where(AuditLog.target_contact_id.in_(contact_ids)))
-        await db.execute(sa_delete(BroadcastRecipient).where(BroadcastRecipient.contact_id.in_(contact_ids)))
-        # Delete contacts themselves
-        await db.execute(sa_delete(Contact).where(Contact.tg_account_id == account_id))
-
-    # Delete staff-account assignments
+    # Unlink from staff
     await db.execute(sa_delete(StaffTgAccount).where(StaffTgAccount.tg_account_id == account_id))
-
-    # Delete the account record
-    await db.execute(sa_delete(TgAccount).where(TgAccount.id == account_id))
 
     await db.commit()
     try:
@@ -1775,6 +1769,10 @@ async def list_tags(user: CurrentUser, db: DB, tg_account_id: UUID | None = None
     query = select(Tag).where(Tag.org_id == _org_id(user))
     if tg_account_id:
         query = query.where(or_(Tag.tg_account_id == tg_account_id, Tag.tg_account_id.is_(None)))
+    # Operators only see tags for their assigned accounts
+    if user.role not in ("super_admin", "admin"):
+        assigned = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
+        query = query.where(or_(Tag.tg_account_id.in_(assigned), Tag.tg_account_id.is_(None)))
     query = query.order_by(Tag.name)
     result = await db.execute(query)
     return result.scalars().all()
@@ -1817,6 +1815,10 @@ async def list_templates(user: CurrentUser, db: DB, tg_account_id: UUID | None =
     query = select(MessageTemplate).where(MessageTemplate.org_id == _org_id(user))
     if tg_account_id:
         query = query.where(or_(MessageTemplate.tg_account_id == tg_account_id, MessageTemplate.tg_account_id.is_(None)))
+    # Operators only see templates for their assigned accounts
+    if user.role not in ("super_admin", "admin"):
+        assigned = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
+        query = query.where(or_(MessageTemplate.tg_account_id.in_(assigned), MessageTemplate.tg_account_id.is_(None)))
     query = query.order_by(MessageTemplate.created_at)
     result = await db.execute(query)
     templates = result.scalars().all()
@@ -2486,6 +2488,45 @@ async def _auto_sync_on_startup():
         except Exception as e:
             print(f"[AUTO-SYNC] {account.phone}: error: {e}")
         await asyncio.sleep(1)  # Pace between accounts
+
+
+async def _cleanup_disconnected_accounts():
+    """Delete data for accounts disconnected more than 30 days ago. Runs daily."""
+    while True:
+        try:
+            async with async_session() as db:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+                # Find accounts disconnected > 30 days
+                result = await db.execute(
+                    select(TgAccount).where(
+                        TgAccount.is_active.is_(False),
+                        TgAccount.disconnected_at.isnot(None),
+                        TgAccount.disconnected_at < cutoff,
+                    )
+                )
+                expired = list(result.scalars().all())
+                for acc in expired:
+                    aid = acc.id
+                    # Delete contacts + cascade data
+                    contact_rows = await db.execute(select(Contact.id).where(Contact.tg_account_id == aid))
+                    cids = [r[0] for r in contact_rows.all()]
+                    if cids:
+                        await db.execute(sa_delete(Message).where(Message.contact_id.in_(cids)))
+                        await db.execute(sa_delete(PinnedChat).where(PinnedChat.contact_id.in_(cids)))
+                        await db.execute(sa_delete(AuditLog).where(AuditLog.target_contact_id.in_(cids)))
+                        await db.execute(sa_delete(BroadcastRecipient).where(BroadcastRecipient.contact_id.in_(cids)))
+                        await db.execute(sa_delete(Contact).where(Contact.tg_account_id == aid))
+                    # Delete templates, tags
+                    await db.execute(sa_delete(MessageTemplate).where(MessageTemplate.tg_account_id == aid))
+                    await db.execute(sa_delete(Tag).where(Tag.tg_account_id == aid))
+                    # Delete account
+                    await db.execute(sa_delete(TgAccount).where(TgAccount.id == aid))
+                    print(f"[CLEANUP] Deleted expired disconnected account {acc.phone} ({aid})")
+                if expired:
+                    await db.commit()
+        except Exception as e:
+            print(f"[CLEANUP] Error: {e}")
+        await asyncio.sleep(86400)  # Run daily
 
 
 async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:

@@ -72,6 +72,7 @@ class TgAccount(Base):
 
     display_name = Column(String, nullable=True)
     show_real_names = Column(Boolean, default=False)
+    disconnected_at = Column(DateTime, nullable=True)
 
     contacts = relationship("Contact", back_populates="tg_account")
 
