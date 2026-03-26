@@ -783,7 +783,7 @@ function ChatsContent() {
   const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel" || selected?.chat_type === "supergroup";
 
   return (
-    <div className="flex overflow-hidden" style={{ height: "calc(100dvh - env(safe-area-inset-top, 0px))" }}>
+    <div className="flex h-full overflow-hidden">
       {/* Contact list */}
       <div className={`w-full md:w-80 border-r border-surface-border flex flex-col bg-gradient-to-b from-surface-card/50 to-transparent ${selected ? "hidden md:flex" : ""}`}>
         <div className="p-4 border-b border-surface-border">
