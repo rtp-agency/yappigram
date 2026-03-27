@@ -189,7 +189,27 @@ def _extract_media(msg_obj) -> tuple[str | None, str | None]:
                 sticker_ext = ".tgs"
         return "sticker", sticker_ext
     if msg_obj.document:
-        return "document", ""
+        # Try to get extension from document filename attribute
+        ext = ""
+        for attr in (msg_obj.document.attributes or []):
+            if hasattr(attr, "file_name") and attr.file_name:
+                parts = attr.file_name.rsplit(".", 1)
+                if len(parts) == 2:
+                    ext = "." + parts[1].lower()
+                break
+        # Fallback: derive from mime_type
+        if not ext and msg_obj.document.mime_type:
+            mime = msg_obj.document.mime_type.lower()
+            mime_map = {
+                "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+                "image/webp": ".webp", "image/bmp": ".bmp",
+                "video/mp4": ".mp4", "video/quicktime": ".mov",
+                "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+                "application/pdf": ".pdf",
+                "application/zip": ".zip",
+            }
+            ext = mime_map.get(mime, "")
+        return "document", ext
     return None, None
 
 

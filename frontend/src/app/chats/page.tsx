@@ -1480,8 +1480,9 @@ function ChatsContent() {
                               <VoicePlayer src={mediaUrl(m.media_path)} direction={m.direction} />
                             )}
                             {m.media_type === "document" && (() => {
-                              const ext = m.media_path!.split('.').pop()?.toLowerCase() || '';
-                              const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext);
+                              const fname = m.media_path!.split('/').pop() || '';
+                              const ext = fname.split('.').pop()?.toLowerCase() || '';
+                              const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext) || fname.startsWith('photo_');
                               return isImage ? (
                                 <img
                                   src={mediaUrl(m.media_path!)}
