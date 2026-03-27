@@ -1858,7 +1858,7 @@ function ChatsContent() {
             )}
 
             {/* Input */}
-            <div className="p-2 md:p-3 border-t border-surface-border bg-surface-card backdrop-blur-sm shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0.5rem)' }}>
+            <div className="p-2 md:p-3 border-t border-surface-border bg-surface-card backdrop-blur-sm shrink-0">
               <div className="flex gap-1 items-center bg-surface-card border border-surface-border rounded-2xl px-1">
                 <input
                   ref={fileInputRef}
