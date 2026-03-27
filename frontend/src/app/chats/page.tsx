@@ -296,6 +296,8 @@ function ChatsContent() {
   const [scheduleMode, setScheduleMode] = useState(false);
   const [scheduleDate, setScheduleDate] = useState("");
   const [scheduleTime, setScheduleTime] = useState("");
+  const [scheduledList, setScheduledList] = useState<any[]>([]);
+  const [showScheduledList, setShowScheduledList] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<Contact | null>(null);
@@ -554,6 +556,20 @@ function ChatsContent() {
       window.removeEventListener("resize", close);
     };
   }, [contextMenu]);
+
+  // Load scheduled messages
+  useEffect(() => {
+    api("/api/scheduled").then(setScheduledList).catch(() => {});
+    const iv = setInterval(() => api("/api/scheduled").then(setScheduledList).catch(() => {}), 15000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const cancelScheduled = async (id: string) => {
+    try {
+      await api(`/api/scheduled/${id}`, { method: "DELETE" });
+      setScheduledList((prev) => prev.filter((s) => s.id !== id));
+    } catch (e: any) { alert(e.message); }
+  };
 
   // Close input menu on outside click
   useEffect(() => {
@@ -1914,6 +1930,17 @@ function ChatsContent() {
                         </svg>
                         Отложенное сообщение
                       </button>
+                      {scheduledList.length > 0 && (
+                        <button
+                          onClick={() => { setShowScheduledList(true); setShowInputMenu(false); }}
+                          className="w-full px-4 py-2.5 text-left text-sm text-amber-400 hover:bg-surface-hover flex items-center gap-3 transition-colors"
+                        >
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+                          </svg>
+                          Запланировано ({scheduledList.length})
+                        </button>
+                      )}
                       <button
                         onClick={() => { setShowTemplates(!showTemplates); setShowEmoji(false); setShowInputMenu(false); }}
                         className="w-full px-4 py-2.5 text-left text-sm text-slate-300 hover:bg-surface-hover flex items-center gap-3 transition-colors"
@@ -2310,7 +2337,7 @@ function ChatsContent() {
                 onClick={async () => {
                   if (!selected || !text.trim() || !scheduleDate || !scheduleTime) return;
                   try {
-                    await api(`/api/messages/${selected.id}/schedule`, {
+                    const sm = await api(`/api/messages/${selected.id}/schedule`, {
                       method: "POST",
                       body: JSON.stringify({
                         content: text.trim(),
@@ -2318,6 +2345,7 @@ function ChatsContent() {
                         timezone: userTimezone,
                       }),
                     });
+                    setScheduledList((prev) => [...prev, sm]);
                     setText("");
                     setScheduleMode(false);
                     setScheduleDate("");
@@ -2327,6 +2355,51 @@ function ChatsContent() {
               >
                 Запланировать
               </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scheduled messages list modal */}
+      {showScheduledList && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in" onClick={() => setShowScheduledList(false)}>
+          <div className="bg-surface-card border border-surface-border rounded-2xl w-full max-w-md mx-4 max-h-[70vh] flex flex-col animate-slide-up" onClick={(e) => e.stopPropagation()}>
+            <div className="p-4 border-b border-surface-border flex items-center justify-between">
+              <h3 className="font-semibold">Запланированные сообщения</h3>
+              <button onClick={() => setShowScheduledList(false)} className="text-slate-500 hover:text-white p-1">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-4 space-y-3">
+              {scheduledList.length === 0 && (
+                <p className="text-sm text-slate-500 text-center py-4">Нет запланированных сообщений</p>
+              )}
+              {scheduledList.map((sm) => (
+                <div key={sm.id} className="border border-surface-border rounded-xl p-3 space-y-2 animate-fade-in">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs text-brand font-medium">{sm.contact_alias || "—"}</div>
+                      <div className="text-sm text-white mt-1 break-words">{sm.content || "[медиа]"}</div>
+                    </div>
+                    <button
+                      onClick={() => cancelScheduled(sm.id)}
+                      className="text-red-400 hover:text-red-300 p-1 shrink-0"
+                      title="Отменить"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+                    {new Date(sm.scheduled_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: sm.timezone || userTimezone })}
+                    <span className="text-slate-600">({sm.timezone})</span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>

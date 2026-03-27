@@ -70,7 +70,7 @@ from config import settings
 from crypto import decrypt
 from models import (
     AuditLog, Base, BotInvite, Broadcast, BroadcastRecipient, Contact,
-    Message, MessageEditHistory, MessageTemplate, PinnedChat, Staff, StaffTgAccount, Tag, TgAccount, async_session, engine,
+    Message, MessageEditHistory, MessageTemplate, PinnedChat, ScheduledMessage, Staff, StaffTgAccount, Tag, TgAccount, async_session, engine,
 )
 from schemas import (
     BotInviteCreate,
@@ -264,6 +264,21 @@ async def on_startup():
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS disconnected_at TIMESTAMP;
+                -- Scheduled messages
+                CREATE TABLE IF NOT EXISTS scheduled_messages (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    contact_id UUID NOT NULL REFERENCES contacts(id),
+                    content TEXT,
+                    media_path VARCHAR,
+                    media_type VARCHAR,
+                    scheduled_at TIMESTAMP NOT NULL,
+                    timezone VARCHAR DEFAULT 'UTC',
+                    status VARCHAR DEFAULT 'pending',
+                    created_by UUID REFERENCES staff(id),
+                    org_id VARCHAR,
+                    created_at TIMESTAMP DEFAULT now(),
+                    sent_at TIMESTAMP
+                );
                 -- Per-staff timezone
                 ALTER TABLE staff ADD COLUMN IF NOT EXISTS timezone VARCHAR DEFAULT 'UTC';
                 -- Message edit history table
@@ -331,6 +346,7 @@ async def on_startup():
     # Auto-sync dialogs for all connected accounts on startup
     asyncio.create_task(_auto_sync_on_startup())
     asyncio.create_task(_cleanup_disconnected_accounts())
+    asyncio.create_task(_process_scheduled_messages())
 
 
 @app.on_event("shutdown")
@@ -1354,70 +1370,106 @@ async def send_msg(contact_id: UUID, req: SendMessage, user: CurrentUser, db: DB
 # ---------- Scheduled messages ----------
 
 class ScheduleMessageRequest(PydanticBaseModel):
-    content: str
+    content: str | None = None
     scheduled_at: str  # ISO format: "2026-03-26T14:30:00"
     timezone: str = "UTC"
 
-@app.post("/api/messages/{contact_id}/schedule")
-async def schedule_message(
-    contact_id: UUID,
-    body: ScheduleMessageRequest,
-    user: CurrentUser,
-    db: DB,
-):
+class ScheduleMessageUpdate(PydanticBaseModel):
+    content: str | None = None
+    scheduled_at: str | None = None
+    timezone: str | None = None
+
+class ScheduledMessageOut(PydanticBaseModel):
+    id: UUID
+    contact_id: UUID
+    content: str | None
+    media_path: str | None
+    media_type: str | None
+    scheduled_at: datetime
+    timezone: str
+    status: str
+    created_at: datetime
+    contact_alias: str | None = None
+    model_config = {"from_attributes": True}
+
+def _parse_schedule_dt(scheduled_at: str, tz_name: str) -> datetime:
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    local_dt = datetime.fromisoformat(scheduled_at).replace(tzinfo=tz)
+    return local_dt.astimezone(timezone.utc)
+
+@app.post("/api/messages/{contact_id}/schedule", response_model=ScheduledMessageOut)
+async def schedule_message(contact_id: UUID, body: ScheduleMessageRequest, user: CurrentUser, db: DB):
     contact = await _get_contact_with_access(contact_id, user, db)
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
-
-    import zoneinfo
-    try:
-        tz = zoneinfo.ZoneInfo(body.timezone)
-    except Exception:
-        tz = timezone.utc
-
-    # Parse the scheduled time in the user's timezone, convert to UTC
-    try:
-        local_dt = datetime.fromisoformat(body.scheduled_at).replace(tzinfo=tz)
-        utc_dt = local_dt.astimezone(timezone.utc)
-    except Exception:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid datetime format")
-
+    utc_dt = _parse_schedule_dt(body.scheduled_at, body.timezone)
     if utc_dt <= datetime.now(timezone.utc):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Scheduled time must be in the future")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Время должно быть в будущем")
+    sm = ScheduledMessage(
+        contact_id=contact_id, content=body.content, scheduled_at=utc_dt,
+        timezone=body.timezone, created_by=user.id, org_id=_org_id(user),
+    )
+    db.add(sm)
+    await db.commit()
+    await db.refresh(sm)
+    out = ScheduledMessageOut.model_validate(sm)
+    out.contact_alias = contact.alias
+    return out
 
-    # Calculate delay in seconds
-    delay = (utc_dt - datetime.now(timezone.utc)).total_seconds()
+@app.get("/api/scheduled", response_model=list[ScheduledMessageOut])
+async def list_scheduled(user: CurrentUser, db: DB):
+    query = select(ScheduledMessage).where(
+        ScheduledMessage.org_id == _org_id(user),
+        ScheduledMessage.status == "pending",
+    ).order_by(ScheduledMessage.scheduled_at)
+    result = await db.execute(query)
+    items = list(result.scalars().all())
+    # Resolve contact aliases
+    cids = {s.contact_id for s in items}
+    alias_map: dict = {}
+    if cids:
+        cr = await db.execute(select(Contact.id, Contact.alias).where(Contact.id.in_(cids)))
+        alias_map = {r[0]: r[1] for r in cr.all()}
+    out = []
+    for s in items:
+        d = ScheduledMessageOut.model_validate(s)
+        d.contact_alias = alias_map.get(s.contact_id, "—")
+        out.append(d)
+    return out
 
-    staff_id = user.id
-    tg_account_id = contact.tg_account_id
-    real_tg_id = contact.real_tg_id
-    content = body.content
+@app.patch("/api/scheduled/{scheduled_id}", response_model=ScheduledMessageOut)
+async def update_scheduled(scheduled_id: UUID, body: ScheduleMessageUpdate, user: CurrentUser, db: DB):
+    result = await db.execute(select(ScheduledMessage).where(
+        ScheduledMessage.id == scheduled_id, ScheduledMessage.org_id == _org_id(user), ScheduledMessage.status == "pending",
+    ))
+    sm = result.scalar_one_or_none()
+    if not sm:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if body.content is not None:
+        sm.content = body.content
+    if body.scheduled_at:
+        tz_name = body.timezone or sm.timezone
+        sm.scheduled_at = _parse_schedule_dt(body.scheduled_at, tz_name)
+        if body.timezone:
+            sm.timezone = body.timezone
+    await db.commit()
+    await db.refresh(sm)
+    return ScheduledMessageOut.model_validate(sm)
 
-    # Schedule via asyncio
-    async def _send_later():
-        await asyncio.sleep(delay)
-        async with async_session() as sdb:
-            c = await sdb.get(Contact, contact_id)
-            if not c or c.status != "approved":
-                return
-            try:
-                tg_msg_id = await send_message(tg_account_id, real_tg_id, content)
-            except Exception:
-                return
-            msg = Message(
-                contact_id=contact_id,
-                tg_message_id=tg_msg_id,
-                direction="outgoing",
-                content=content,
-                sent_by=staff_id,
-            )
-            sdb.add(msg)
-            c.last_message_at = func.now()
-            await sdb.commit()
-
-    asyncio.create_task(_send_later())
-
-    return {"status": "scheduled", "scheduled_at": utc_dt.isoformat(), "content": body.content}
+@app.delete("/api/scheduled/{scheduled_id}", status_code=204)
+async def cancel_scheduled(scheduled_id: UUID, user: CurrentUser, db: DB):
+    result = await db.execute(select(ScheduledMessage).where(
+        ScheduledMessage.id == scheduled_id, ScheduledMessage.org_id == _org_id(user), ScheduledMessage.status == "pending",
+    ))
+    sm = result.scalar_one_or_none()
+    if not sm:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    sm.status = "cancelled"
+    await db.commit()
 
 
 @app.post("/api/messages/{contact_id}/send-media", response_model=MessageOut)
@@ -2496,6 +2548,56 @@ async def _auto_sync_on_startup():
         except Exception as e:
             print(f"[AUTO-SYNC] {account.phone}: error: {e}")
         await asyncio.sleep(1)  # Pace between accounts
+
+
+async def _process_scheduled_messages():
+    """Check for due scheduled messages every 30 seconds and send them."""
+    await asyncio.sleep(5)  # Wait for startup
+    while True:
+        try:
+            async with async_session() as db:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                result = await db.execute(
+                    select(ScheduledMessage).where(
+                        ScheduledMessage.status == "pending",
+                        ScheduledMessage.scheduled_at <= now,
+                    )
+                )
+                due = list(result.scalars().all())
+                for sm in due:
+                    try:
+                        contact = await db.get(Contact, sm.contact_id)
+                        if not contact or contact.status != "approved":
+                            sm.status = "cancelled"
+                            continue
+                        tg_msg_id = await send_message(
+                            contact.tg_account_id, contact.real_tg_id,
+                            text=sm.content,
+                            file_path=os.path.join(MEDIA_DIR, sm.media_path) if sm.media_path else None,
+                            media_type=sm.media_type,
+                        )
+                        msg = Message(
+                            contact_id=sm.contact_id,
+                            tg_message_id=tg_msg_id,
+                            direction="outgoing",
+                            content=sm.content,
+                            media_type=sm.media_type,
+                            media_path=sm.media_path,
+                            sent_by=sm.created_by,
+                        )
+                        db.add(msg)
+                        contact.last_message_at = func.now()
+                        sm.status = "sent"
+                        sm.sent_at = func.now()
+                        print(f"[SCHEDULED] Sent message {sm.id} to {contact.alias}")
+                    except Exception as e:
+                        print(f"[SCHEDULED] Failed to send {sm.id}: {e}")
+                        sm.status = "failed"
+                if due:
+                    await db.commit()
+        except Exception as e:
+            print(f"[SCHEDULED] Loop error: {e}")
+        await asyncio.sleep(30)
 
 
 async def _cleanup_disconnected_accounts():

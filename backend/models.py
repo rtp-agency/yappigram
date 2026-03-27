@@ -151,6 +151,23 @@ class Message(Base):
     reply_to = relationship("Message", foreign_keys=[reply_to_msg_id], remote_side="Message.id")
 
 
+class ScheduledMessage(Base):
+    __tablename__ = "scheduled_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    contact_id = Column(UUID(as_uuid=True), ForeignKey("contacts.id"), nullable=False)
+    content = Column(Text, nullable=True)
+    media_path = Column(String, nullable=True)
+    media_type = Column(String, nullable=True)
+    scheduled_at = Column(DateTime, nullable=False)  # UTC
+    timezone = Column(String, default="UTC")
+    status = Column(String, default="pending")  # pending, sent, cancelled
+    created_by = Column(UUID(as_uuid=True), ForeignKey("staff.id"), nullable=True)
+    org_id = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime, default=func.now())
+    sent_at = Column(DateTime, nullable=True)
+
+
 class Tag(Base):
     __tablename__ = "tags"
 
