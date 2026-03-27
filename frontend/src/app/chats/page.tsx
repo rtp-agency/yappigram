@@ -352,7 +352,7 @@ function ChatsContent() {
   useEffect(() => {
     const acctId = filterAccountId || undefined;
     fetchContacts(undefined, acctId).then((data: Contact[]) =>
-      setContacts(data.sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || "")))
+      setContacts(data)
     ).catch(console.error);
   }, [filterAccountId]);
 
@@ -367,15 +367,14 @@ function ChatsContent() {
           if (!exists) {
             // New contact — fetch full contact list to get the new one
             fetchContacts(undefined, filterAccountRef.current || undefined).then((data: Contact[]) =>
-              setContacts(data.sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || "")))
+              setContacts(data)
             ).catch(console.error);
             return prev;
           }
           const msgPreview = event.message?.content || (event.message?.media_type ? `[${event.message.media_type}]` : "") || "";
           const msgDir = event.message?.direction || "incoming";
           return prev
-            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100), last_message_direction: msgDir } : c)
-            .sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || ""));
+            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100), last_message_direction: msgDir } : c);
         });
         if (isCurrentChat) {
           setMessages((prev) => {
@@ -435,15 +434,9 @@ function ChatsContent() {
       const acctId = filterAccountRef.current || undefined;
       fetchContacts(undefined, acctId).then((data: Contact[]) => {
         setContacts((prev) => {
-          const newSorted = data.sort((a, b) => {
-            const ap = pinned.has(a.id) ? 1 : 0;
-            const bp = pinned.has(b.id) ? 1 : 0;
-            if (ap !== bp) return bp - ap;
-            return (b.last_message_at || "").localeCompare(a.last_message_at || "");
-          });
           // Only update if something changed
-          if (JSON.stringify(newSorted.map((c: Contact) => c.last_message_at)) !== JSON.stringify(prev.map((c: Contact) => c.last_message_at))) {
-            return newSorted;
+          if (JSON.stringify(data.map((c: Contact) => c.last_message_at)) !== JSON.stringify(prev.map((c: Contact) => c.last_message_at))) {
+            return data;
           }
           return prev;
         });
@@ -640,12 +633,6 @@ function ChatsContent() {
       // Move this chat to top + update last message preview
       setContacts((prev) => prev
         .map((c: Contact) => c.id === selected.id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: (savedText || "[media]").slice(0, 100), last_message_direction: "outgoing" } : c)
-        .sort((a: Contact, b: Contact) => {
-          const ap = pinned.has(a.id) ? 1 : 0;
-          const bp = pinned.has(b.id) ? 1 : 0;
-          if (ap !== bp) return bp - ap;
-          return (b.last_message_at || "").localeCompare(a.last_message_at || "");
-        })
       );
     } catch (e: any) {
       // Restore text on failure
