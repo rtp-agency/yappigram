@@ -760,6 +760,7 @@ async def list_contacts(
     assigned_to: UUID | None = None,
     tag: str | None = None,
     tg_account_id: UUID | None = None,
+    archived: bool = Query(False),
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -770,6 +771,9 @@ async def list_contacts(
 
     # Filter out Telegram service account
     query = query.where(Contact.real_tg_id != 777000)
+
+    # Archive filter
+    query = query.where(Contact.is_archived == archived)
 
     # Filter by specific TG account
     if tg_account_id:

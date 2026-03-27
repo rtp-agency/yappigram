@@ -348,12 +348,15 @@ function ChatsContent() {
     fetchTemplates(acctId).then(setTemplates).catch(console.error);
   }, [filterAccountId]);
 
-  // Re-fetch contacts when account filter changes
+  // Re-fetch contacts when account filter changes (both normal + archived)
   useEffect(() => {
     const acctId = filterAccountId || undefined;
-    fetchContacts(undefined, acctId).then((data: Contact[]) =>
-      setContacts(data)
-    ).catch(console.error);
+    Promise.all([
+      fetchContacts(undefined, acctId, false),
+      fetchContacts(undefined, acctId, true),
+    ]).then(([normal, archived]) => {
+      setContacts([...normal, ...archived]);
+    }).catch(console.error);
   }, [filterAccountId]);
 
   useEffect(() => {
@@ -365,10 +368,10 @@ function ChatsContent() {
         setContacts((prev) => {
           const exists = prev.some((c) => c.id === event.contact_id);
           if (!exists) {
-            // New contact — fetch full contact list to get the new one
-            fetchContacts(undefined, filterAccountRef.current || undefined).then((data: Contact[]) =>
-              setContacts(data)
-            ).catch(console.error);
+            // New contact — fetch full contact list
+            const acctId = filterAccountRef.current || undefined;
+            Promise.all([fetchContacts(undefined, acctId, false), fetchContacts(undefined, acctId, true)])
+              .then(([n, a]) => setContacts([...n, ...a])).catch(console.error);
             return prev;
           }
           const msgPreview = event.message?.content || (event.message?.media_type ? `[${event.message.media_type}]` : "") || "";
@@ -432,11 +435,14 @@ function ChatsContent() {
   useEffect(() => {
     const interval = setInterval(() => {
       const acctId = filterAccountRef.current || undefined;
-      fetchContacts(undefined, acctId).then((data: Contact[]) => {
+      Promise.all([
+        fetchContacts(undefined, acctId, false),
+        fetchContacts(undefined, acctId, true),
+      ]).then(([normal, archived]) => {
+        const all = [...normal, ...archived];
         setContacts((prev) => {
-          // Only update if something changed
-          if (JSON.stringify(data.map((c: Contact) => c.last_message_at)) !== JSON.stringify(prev.map((c: Contact) => c.last_message_at))) {
-            return data;
+          if (JSON.stringify(all.map((c: Contact) => c.last_message_at)) !== JSON.stringify(prev.map((c: Contact) => c.last_message_at))) {
+            return all;
           }
           return prev;
         });

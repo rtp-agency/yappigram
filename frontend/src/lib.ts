@@ -413,10 +413,11 @@ export async function createTag(data: { name: string; color: string; tg_account_
   return api("/api/tags", { method: "POST", body: JSON.stringify(data) });
 }
 
-export async function fetchContacts(status?: string, tgAccountId?: string): Promise<Contact[]> {
+export async function fetchContacts(status?: string, tgAccountId?: string, archived?: boolean): Promise<Contact[]> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (tgAccountId) params.set("tg_account_id", tgAccountId);
+  if (archived) params.set("archived", "true");
   return api(`/api/contacts?${params.toString()}`);
 }
 
