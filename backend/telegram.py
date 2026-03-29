@@ -195,6 +195,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 media_path = os.path.basename(actual_path) if actual_path else filename
 
             sanitized_content = sanitize_text(msg_obj.text)
+            tg_date = msg_obj.date.replace(tzinfo=None) if msg_obj.date else None
             msg = Message(
                 contact_id=contact.id,
                 tg_message_id=msg_obj.id,
@@ -202,6 +203,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 content=sanitized_content,
                 media_type=media_type,
                 media_path=media_path,
+                created_at=tg_date,
             )
             db.add(msg)
             contact.last_message_at = func.now()
@@ -424,6 +426,8 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
             # --- SAVE MESSAGE ---
             sanitized_content = sanitize_text(msg_obj.text)
+            # Use Telegram date, strip tzinfo for TIMESTAMP WITHOUT TIME ZONE
+            tg_date = msg_obj.date.replace(tzinfo=None) if msg_obj.date else None
             msg = Message(
                 contact_id=contact.id,
                 tg_message_id=msg_obj.id,
@@ -440,6 +444,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 inline_buttons=inline_buttons_json,
                 topic_id=topic_id,
                 topic_name=topic_name,
+                created_at=tg_date,
             )
             db.add(msg)
             contact.last_message_at = func.now()

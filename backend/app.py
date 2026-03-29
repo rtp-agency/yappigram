@@ -343,7 +343,7 @@ async def approve_contact(contact_id: UUID, user: AdminUser, db: DB):
                 reply_to_content_preview=reply_to_content_preview,
                 forwarded_from_alias=forwarded_from_alias,
                 inline_buttons=inline_buttons_json,
-                created_at=msg_obj.date,
+                created_at=msg_obj.date.replace(tzinfo=None) if msg_obj.date else None,
             )
             db.add(msg)
 
@@ -567,7 +567,7 @@ async def get_messages(
     query = (
         select(Message)
         .where(Message.contact_id == contact_id)
-        .order_by(Message.created_at.desc())
+        .order_by(Message.tg_message_id.desc().nullslast())
         .offset(offset)
         .limit(limit)
     )
