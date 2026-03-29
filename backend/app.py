@@ -567,7 +567,7 @@ async def get_messages(
     query = (
         select(Message)
         .where(Message.contact_id == contact_id)
-        .order_by(Message.tg_message_id.desc().nullslast())
+        .order_by(Message.created_at.desc(), Message.tg_message_id.desc().nullslast())
         .offset(offset)
         .limit(limit)
     )

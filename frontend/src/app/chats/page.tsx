@@ -236,11 +236,14 @@ function ChatsContent() {
       api(`/api/messages/${selectedId}`).then((msgs: Message[]) => {
         if (cancelled) return;
         setMessages((prev) => {
-          if (msgs.length !== prev.length || JSON.stringify(msgs.map(m => m.is_deleted)) !== JSON.stringify(prev.map(m => m.is_deleted))) return msgs;
-          return prev;
+          // Always accept server data — it's the source of truth for ordering
+          const prevIds = prev.map(m => m.id).join(",");
+          const newIds = msgs.map(m => m.id).join(",");
+          if (prevIds === newIds) return prev;
+          return msgs;
         });
       }).catch(() => {});
-    }, 3000);
+    }, 5000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [selectedId]);
 
