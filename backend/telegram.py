@@ -165,9 +165,10 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
         await asyncio.sleep(1.5)
         async with async_session() as db:
             # Only save if contact exists and is approved
+            possible_ids = list({peer_tg_id, -peer_tg_id, abs(peer_tg_id)})
             result = await db.execute(
                 select(Contact).where(
-                    Contact.real_tg_id == peer_tg_id,
+                    Contact.real_tg_id.in_(possible_ids),
                     Contact.tg_account_id == account.id,
                 )
             )
@@ -267,13 +268,19 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
         async with async_session() as db:
             # --- CONTACT LOOKUP / CREATION ---
+            # Check both positive and negative ID (Telethon may negate group IDs)
+            possible_ids = list({peer_tg_id, -peer_tg_id, abs(peer_tg_id)})
             result = await db.execute(
                 select(Contact).where(
-                    Contact.real_tg_id == peer_tg_id,
+                    Contact.real_tg_id.in_(possible_ids),
                     Contact.tg_account_id == account.id,
                 )
             )
-            contact = result.scalar_one_or_none()
+            contact = result.scalars().first()
+            # Update stored ID to match what Telethon actually uses
+            if contact and contact.real_tg_id != peer_tg_id:
+                contact.real_tg_id = peer_tg_id
+                await db.commit()
 
             is_new_contact = False
             first_name = ""

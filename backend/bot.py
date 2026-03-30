@@ -447,9 +447,10 @@ async def cmd_add_chat(message: TgMessage):
             await message.answer("❌ Нет подключённых TG аккаунтов")
             return
 
-        # Check if contact already exists — auto-approve if not yet approved
+        # Check if contact already exists — search by both ID formats
+        possible_ids = list({tg_id, -tg_id, abs(tg_id)})
         existing = await db.execute(
-            select(Contact).where(Contact.real_tg_id == tg_id, Contact.tg_account_id == account.id)
+            select(Contact).where(Contact.real_tg_id.in_(possible_ids), Contact.tg_account_id == account.id)
         )
         contact = existing.scalars().first()
         if contact:
@@ -528,6 +529,11 @@ async def cmd_add_chat(message: TgMessage):
             return
 
         entity = await client.get_entity(tg_id)
+        # Use Telethon's peer ID format (matches event.chat_id)
+        from telethon.utils import get_peer_id
+        resolved_tg_id = get_peer_id(entity)
+        print(f"[ADD] user input={tg_id}, resolved={resolved_tg_id}, entity.id={entity.id}")
+
         is_group = hasattr(entity, "title")
         chat_type = "private"
         if is_group:
@@ -549,7 +555,7 @@ async def cmd_add_chat(message: TgMessage):
                     title = getattr(entity, "title", "") or ""
                     contact = Contact(
                         tg_account_id=account.id,
-                        real_tg_id=tg_id,
+                        real_tg_id=resolved_tg_id,
                         real_name_encrypted=encrypt(title),
                         real_username_encrypted=encrypt(getattr(entity, "username", None) or ""),
                         group_title_encrypted=encrypt(title),
@@ -564,7 +570,7 @@ async def cmd_add_chat(message: TgMessage):
                     username = getattr(entity, "username", None)
                     contact = Contact(
                         tg_account_id=account.id,
-                        real_tg_id=tg_id,
+                        real_tg_id=resolved_tg_id,
                         real_name_encrypted=encrypt(first_name),
                         real_username_encrypted=encrypt(username) if username else None,
                         alias=generate_alias(first_name, seq),
@@ -668,6 +674,49 @@ async def on_approve(callback: CallbackQuery):
         contact.status = "approved"
         contact.approved_at = sqlfunc.now()
         await db.commit()
+
+        # Load message history on approve (same as API endpoint)
+        try:
+            from telegram import fetch_history, sanitize_text, _extract_media, _extract_inline_buttons
+            from models import Message
+            import os
+            MEDIA_DIR = "media"
+            tg_messages = await fetch_history(contact.tg_account_id, contact.real_tg_id, limit=100)
+            sorted_msgs = sorted(
+                [m for m in tg_messages if m and (m.text or m.media)],
+                key=lambda m: m.date
+            )
+            for msg_obj in sorted_msgs:
+                dup = await db.execute(
+                    select(Message).where(Message.tg_message_id == msg_obj.id, Message.contact_id == contact.id)
+                )
+                if dup.scalars().first():
+                    continue
+                media_type, ext = _extract_media(msg_obj)
+                media_path = None
+                if media_type and ext is not None:
+                    filename = f"{contact.id}_{msg_obj.id}{ext}"
+                    filepath = os.path.join(MEDIA_DIR, filename)
+                    try:
+                        actual = await msg_obj.download_media(file=filepath)
+                        media_path = os.path.basename(actual) if actual else filename
+                    except Exception:
+                        media_path = filename
+                direction = "outgoing" if msg_obj.out else "incoming"
+                msg = Message(
+                    contact_id=contact.id,
+                    tg_message_id=msg_obj.id,
+                    direction=direction,
+                    content=sanitize_text(msg_obj.text),
+                    media_type=media_type,
+                    media_path=media_path,
+                    inline_buttons=_extract_inline_buttons(msg_obj),
+                    created_at=msg_obj.date.replace(tzinfo=None) if msg_obj.date else None,
+                )
+                db.add(msg)
+            await db.commit()
+        except Exception as e:
+            print(f"[APPROVE-BOT] History fetch failed: {e}")
 
     await callback.answer("✅ Одобрен")
     try:
