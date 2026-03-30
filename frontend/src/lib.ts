@@ -28,7 +28,17 @@ export function getRole(): string | null {
   return getTokens()?.role || null;
 }
 
+// Singleton refresh — prevents 4 concurrent refreshes on page load
+let _refreshPromise: Promise<string | null> | null = null;
+
 async function refreshTokens(): Promise<string | null> {
+  if (_refreshPromise) return _refreshPromise;
+  _refreshPromise = _doRefresh();
+  try { return await _refreshPromise; }
+  finally { _refreshPromise = null; }
+}
+
+async function _doRefresh(): Promise<string | null> {
   const tokens = getTokens();
   if (!tokens?.refresh_token) return null;
 
@@ -49,11 +59,15 @@ async function refreshTokens(): Promise<string | null> {
 }
 
 export async function api(path: string, options: RequestInit = {}): Promise<any> {
-  const tokens = getTokens();
+  // Always read freshest token (might have been refreshed by another call)
+  let tokens = getTokens();
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
+  // Don't set Content-Type for FormData
+  if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
 
   if (tokens?.access_token) {
     headers["Authorization"] = `Bearer ${tokens.access_token}`;
@@ -62,7 +76,7 @@ export async function api(path: string, options: RequestInit = {}): Promise<any>
   let res = await fetch(`${API}${path}`, { ...options, headers });
 
   // Auto-refresh on 401
-  if (res.status === 401 && tokens?.refresh_token) {
+  if (res.status === 401) {
     const newToken = await refreshTokens();
     if (newToken) {
       headers["Authorization"] = `Bearer ${newToken}`;
