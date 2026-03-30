@@ -42,46 +42,48 @@ async function _doRefresh(): Promise<string | null> {
   const tokens = getTokens();
   if (!tokens?.refresh_token) return null;
 
-  const res = await fetch(`${API}/api/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: tokens.refresh_token }),
-  });
+  try {
+    const res = await fetch(`${API}/api/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: tokens.refresh_token }),
+    });
 
-  if (!res.ok) {
-    clearTokens();
+    if (!res.ok) {
+      // Only clear on definitive rejection, not network errors
+      if (res.status === 401 || res.status === 403) clearTokens();
+      return null;
+    }
+
+    const data = await res.json();
+    saveTokens(data);
+    return data.access_token;
+  } catch {
+    // Network error — don't clear tokens, just return null
     return null;
   }
-
-  const data = await res.json();
-  saveTokens(data);
-  return data.access_token;
 }
 
 export async function api(path: string, options: RequestInit = {}): Promise<any> {
-  // Always read freshest token (might have been refreshed by another call)
-  let tokens = getTokens();
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
   };
-  // Don't set Content-Type for FormData
   if (!(options.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
 
-  if (tokens?.access_token) {
-    headers["Authorization"] = `Bearer ${tokens.access_token}`;
-  }
+  // Always read freshest token right before request
+  const token = getTokens()?.access_token;
+  if (token) headers["Authorization"] = `Bearer ${token}`;
 
   let res = await fetch(`${API}${path}`, { ...options, headers });
 
-  // Auto-refresh on 401
+  // Auto-refresh on 401 and retry once
   if (res.status === 401) {
     const newToken = await refreshTokens();
-    if (newToken) {
-      headers["Authorization"] = `Bearer ${newToken}`;
-      res = await fetch(`${API}${path}`, { ...options, headers });
-    }
+    if (!newToken) throw new Error("Session expired");
+    headers["Authorization"] = `Bearer ${newToken}`;
+    res = await fetch(`${API}${path}`, { ...options, headers });
   }
 
   if (!res.ok) {
@@ -274,27 +276,13 @@ export function mediaUrl(media_path: string): string {
 }
 
 export async function uploadMedia(contactId: string, file: File, caption?: string): Promise<any> {
-  const tokens = getTokens();
   const formData = new FormData();
   formData.append("file", file);
 
-  const url = new URL(`${API}/api/messages/${contactId}/send-media`);
-  if (caption) url.searchParams.set("caption", caption);
+  let path = `/api/messages/${contactId}/send-media`;
+  if (caption) path += `?caption=${encodeURIComponent(caption)}`;
 
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${tokens?.access_token}`,
-    },
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Upload failed");
-  }
-
-  return res.json();
+  return api(path, { method: "POST", body: formData });
 }
 
 export interface StaffMember {

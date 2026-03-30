@@ -207,66 +207,68 @@ function ChatsContent() {
 
   useEffect(() => {
     if (!selectedId) { setMessages([]); return; }
-    let cancelled = false;
+    let active = true;
     setMessages([]);
     setTranslations(new Map());
-    // Fetch messages with retries
-    const loadMessages = async (attempt = 0) => {
-      if (cancelled) return;
-      try {
-        const msgs = await api(`/api/messages/${selectedId}`);
-        if (!cancelled && msgs) {
-          shouldScrollRef.current = "instant";
-          setMessages(msgs);
-        }
-      } catch {
-        if (!cancelled && attempt < 3) {
-          setTimeout(() => loadMessages(attempt + 1), 1000 * (attempt + 1));
-        }
-      }
-    };
-    loadMessages();
     setReplyTo(null);
     setForwardMode(false);
     setForwardSelected(new Set());
     setContextMenu(null);
     setEditingMsg(null);
-    // Clear unread for this chat — persist to DB
-    setUnread((prev) => { const n = new Map(prev); n.delete(selectedId); return n; });
-    api(`/api/messages/${selectedId}/read`, { method: "PATCH" }).catch(console.error);
-    return () => { cancelled = true; };
-  }, [selectedId]);
 
-  useEffect(() => {
-    if (!selectedId) return;
-    let cancelled = false;
-    const poll = () => {
-      if (cancelled) return;
+    // Load messages — retry up to 3 times
+    const load = async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (!active) return;
+        try {
+          const msgs = await api(`/api/messages/${selectedId}`);
+          if (active && msgs) {
+            shouldScrollRef.current = "instant";
+            setMessages(msgs);
+          }
+          return; // success
+        } catch {
+          if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+    };
+    load();
+
+    // Mark as read
+    setUnread((prev) => { const n = new Map(prev); n.delete(selectedId); return n; });
+    api(`/api/messages/${selectedId}/read`, { method: "PATCH" }).catch(() => {});
+
+    // Polling — only append new messages and update flags, never reorder
+    const poll = setInterval(() => {
+      if (!active) return;
       api(`/api/messages/${selectedId}`).then((msgs: Message[]) => {
-        if (cancelled) return;
+        if (!active) return;
         setMessages((prev) => {
-          if (!prev.length && msgs.length) return msgs;
-          // Only add genuinely new messages — never reorder existing ones
+          if (!prev.length) {
+            // First load from polling (initial load failed)
+            if (msgs.length) shouldScrollRef.current = "instant";
+            return msgs;
+          }
           const existingIds = new Set(prev.map(m => m.id));
           const newMsgs = msgs.filter(m => !existingIds.has(m.id));
-          // Update flags (deleted/edited) on existing messages
+          // Update flags on existing — use Map for O(1) lookup
+          const serverMap = new Map(msgs.map(m => [m.id, m]));
           let updated = false;
           const merged = prev.map(p => {
-            const s = msgs.find(m => m.id === p.id);
+            const s = serverMap.get(p.id);
             if (s && (s.is_deleted !== p.is_deleted || s.is_edited !== p.is_edited || s.content !== p.content)) {
               updated = true;
               return { ...p, is_deleted: s.is_deleted, is_edited: s.is_edited, content: s.content };
             }
             return p;
           });
-          if (newMsgs.length === 0 && !updated) return prev;
-          if (newMsgs.length === 0) return merged;
-          return [...merged, ...newMsgs];
+          if (!newMsgs.length && !updated) return prev;
+          return newMsgs.length ? [...merged, ...newMsgs] : merged;
         });
       }).catch(() => {});
-    };
-    const interval = setInterval(poll, 10000);
-    return () => { cancelled = true; clearInterval(interval); };
+    }, 10000);
+
+    return () => { active = false; clearInterval(poll); };
   }, [selectedId]);
 
   // Scroll after render — only when explicitly requested
