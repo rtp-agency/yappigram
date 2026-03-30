@@ -1004,3 +1004,62 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/api/admin/reload-history")
+async def reload_all_history(user: Annotated[Staff, Depends(require_role("super_admin"))], db: DB):
+    """Reload last 100 messages from Telegram for all approved contacts."""
+    from telegram import fetch_history, sanitize_text, _extract_media, _extract_inline_buttons
+
+    results = []
+    contacts_r = await db.execute(select(Contact).where(Contact.status == "approved"))
+    contacts = contacts_r.scalars().all()
+
+    for contact in contacts:
+        try:
+            tg_messages = await fetch_history(contact.tg_account_id, contact.real_tg_id, limit=100)
+            sorted_msgs = sorted(
+                [m for m in tg_messages if m and (m.text or m.media)],
+                key=lambda m: m.date
+            )
+            saved = 0
+            for msg_obj in sorted_msgs:
+                dup = await db.execute(
+                    select(Message).where(
+                        Message.tg_message_id == msg_obj.id,
+                        Message.contact_id == contact.id,
+                    )
+                )
+                if dup.scalars().first():
+                    continue
+                media_type, ext = _extract_media(msg_obj)
+                media_path = None
+                if media_type and ext is not None:
+                    filename = f"{contact.id}_{msg_obj.id}{ext}"
+                    filepath = os.path.join(MEDIA_DIR, filename)
+                    try:
+                        actual_path = await msg_obj.download_media(file=filepath)
+                        media_path = os.path.basename(actual_path) if actual_path else filename
+                    except Exception:
+                        media_path = filename
+                direction = "outgoing" if msg_obj.out else "incoming"
+                msg = Message(
+                    contact_id=contact.id,
+                    tg_message_id=msg_obj.id,
+                    direction=direction,
+                    content=sanitize_text(msg_obj.text),
+                    media_type=media_type,
+                    media_path=media_path,
+                    inline_buttons=_extract_inline_buttons(msg_obj),
+                    created_at=msg_obj.date.replace(tzinfo=None) if msg_obj.date else None,
+                )
+                db.add(msg)
+                saved += 1
+            if saved:
+                await db.commit()
+            results.append({"alias": contact.alias, "fetched": len(sorted_msgs), "saved": saved})
+        except Exception as e:
+            results.append({"alias": contact.alias, "error": str(e)})
+            await db.rollback()
+
+    return {"contacts": len(contacts), "results": results}
