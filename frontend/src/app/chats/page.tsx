@@ -795,7 +795,8 @@ function ChatsContent() {
             {/* Messages */}
             <div
               ref={messagesContainerRef}
-              className="flex-1 overflow-auto overflow-x-hidden p-4 space-y-2 relative animate-fade-in"
+              className="flex-1 overflow-auto overflow-x-hidden p-4 space-y-2 relative"
+              style={{ overflowAnchor: "auto" }}
               onScroll={(e) => {
                 const el = e.currentTarget;
                 setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 300);
@@ -909,15 +910,20 @@ function ChatsContent() {
                         {m.media_type && m.media_path && (
                           <div className="mb-2">
                             {m.media_type === "photo" && (
-                              <img
-                                src={mediaUrl(m.media_path)}
-                                alt=""
-                                className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                                onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
-                              />
+                              <div className="w-48 h-48 rounded-xl overflow-hidden bg-surface-hover">
+                                <img
+                                  src={mediaUrl(m.media_path)}
+                                  alt=""
+                                  loading="lazy"
+                                  className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                  onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
+                                />
+                              </div>
                             )}
                             {m.media_type === "video" && (
-                              <video src={mediaUrl(m.media_path)} controls className="rounded-xl max-w-full max-h-64" />
+                              <div className="w-56 h-40 rounded-xl overflow-hidden bg-surface-hover">
+                                <video src={mediaUrl(m.media_path)} controls className="w-full h-full object-cover" />
+                              </div>
                             )}
                             {m.media_type === "voice" && (
                               <audio src={mediaUrl(m.media_path)} controls className="w-full" />
@@ -926,12 +932,15 @@ function ChatsContent() {
                               const ext = m.media_path!.split('.').pop()?.toLowerCase() || '';
                               const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext);
                               return isImage ? (
-                                <img
-                                  src={mediaUrl(m.media_path!)}
-                                  alt=""
-                                  className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                                  onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
-                                />
+                                <div className="w-48 h-48 rounded-xl overflow-hidden bg-surface-hover">
+                                  <img
+                                    src={mediaUrl(m.media_path!)}
+                                    alt=""
+                                    loading="lazy"
+                                    className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                    onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
+                                  />
+                                </div>
                               ) : (
                                 <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-brand-light hover:underline">
                                   <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
