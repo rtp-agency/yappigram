@@ -121,6 +121,8 @@ function ChatsContent() {
   const selectedRef = useRef<Contact | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Track last message ID to detect genuinely NEW messages (not polling replacements)
+  const lastMsgCountRef = useRef(0);
 
   useEffect(() => { api("/api/pinned").then((ids: string[]) => setPinned(new Set(ids))).catch(console.error); }, []);
   useEffect(() => {
@@ -259,14 +261,21 @@ function ChatsContent() {
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
-    // Skip empty messages (clearing phase during chat switch)
-    if (messages.length === 0) return;
+    if (messages.length === 0) { lastMsgCountRef.current = 0; return; }
+
     // Always scroll to bottom when chat first opens
     if (justOpenedChat.current) {
       justOpenedChat.current = false;
+      lastMsgCountRef.current = messages.length;
       messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
       return;
     }
+
+    // Only auto-scroll if new messages were ADDED (not polling replacement)
+    const hadNewMessages = messages.length > lastMsgCountRef.current;
+    lastMsgCountRef.current = messages.length;
+    if (!hadNewMessages) return;
+
     // Auto-scroll only if user is near the bottom (within 150px)
     const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
     if (isNearBottom) {
@@ -1264,6 +1273,19 @@ function ChatsContent() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
+            {contextMenu.msg.content && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(contextMenu.msg.content || "").catch(() => {});
+                  setBotToast("Скопировано");
+                  setContextMenu(null);
+                }}
+                className="w-full px-4 py-2.5 text-sm text-left hover:bg-surface-hover transition-colors flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                Copy
+              </button>
+            )}
             <button
               onClick={() => { setReplyTo(contextMenu.msg); setContextMenu(null); inputRef.current?.focus(); }}
               className="w-full px-4 py-2.5 text-sm text-left hover:bg-surface-hover transition-colors flex items-center gap-2"
