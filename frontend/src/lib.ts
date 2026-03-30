@@ -90,7 +90,10 @@ let _handlers: WSHandler[] = [];
 
 export function connectWS() {
   const tokens = getTokens();
-  if (!tokens?.access_token || _ws) return;
+  if (!tokens?.access_token) return;
+  // Don't create if already open or connecting
+  if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) return;
+  _ws = null;
 
   const wsUrl = API.replace("http", "ws");
   _ws = new WebSocket(`${wsUrl}/ws?token=${tokens.access_token}`);
@@ -100,14 +103,16 @@ export function connectWS() {
     _handlers.forEach((h) => h(data));
   };
 
+  _ws.onerror = () => {
+    // Error fires before close — just let onclose handle reconnect
+  };
+
   _ws.onclose = (e) => {
     _ws = null;
-    if (e.code === 4001) {
-      // Token expired — refresh before reconnecting
-      refreshTokens().then(() => setTimeout(connectWS, 500)).catch(() => setTimeout(connectWS, 5000));
-    } else {
-      setTimeout(connectWS, 3000);
-    }
+    // Always refresh token before reconnecting — prevents stale token loops
+    refreshTokens()
+      .then(() => setTimeout(connectWS, 1000))
+      .catch(() => setTimeout(connectWS, 5000));
   };
 }
 

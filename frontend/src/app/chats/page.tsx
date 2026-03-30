@@ -203,19 +203,18 @@ function ChatsContent() {
     let cancelled = false;
     setMessages([]);
     setTranslations(new Map());
-    // Fetch messages with retry
-    const loadMessages = () => {
-      api(`/api/messages/${selectedId}`).then((msgs) => {
-        if (!cancelled && msgs && msgs.length >= 0) setMessages(msgs);
-      }).catch(() => {
-        // Retry once after 1.5s (token refresh may have kicked in)
-        setTimeout(() => {
-          if (cancelled) return;
-          api(`/api/messages/${selectedId}`).then((msgs) => {
-            if (!cancelled) setMessages(msgs);
-          }).catch(console.error);
-        }, 1500);
-      });
+    // Fetch messages with retries
+    const loadMessages = async (attempt = 0) => {
+      if (cancelled) return;
+      try {
+        const msgs = await api(`/api/messages/${selectedId}`);
+        if (!cancelled && msgs) setMessages(msgs);
+      } catch {
+        // Retry up to 3 times with backoff
+        if (!cancelled && attempt < 3) {
+          setTimeout(() => loadMessages(attempt + 1), 1000 * (attempt + 1));
+        }
+      }
     };
     loadMessages();
     setReplyTo(null);
@@ -232,18 +231,21 @@ function ChatsContent() {
   useEffect(() => {
     if (!selectedId) return;
     let cancelled = false;
-    const interval = setInterval(() => {
+    const poll = () => {
+      if (cancelled) return;
       api(`/api/messages/${selectedId}`).then((msgs: Message[]) => {
         if (cancelled) return;
         setMessages((prev) => {
-          // Always accept server data — it's the source of truth for ordering
+          if (!prev.length && msgs.length) return msgs; // First load from polling
           const prevIds = prev.map(m => m.id).join(",");
           const newIds = msgs.map(m => m.id).join(",");
           if (prevIds === newIds) return prev;
           return msgs;
         });
       }).catch(() => {});
-    }, 5000);
+    };
+    // Poll at 10s — WS is primary, this is just a safety net
+    const interval = setInterval(poll, 10000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [selectedId]);
 
@@ -378,10 +380,11 @@ function ChatsContent() {
   const doForward = async (toContactId: string) => {
     if (!selected || forwardSelected.size === 0) return;
     try {
-      await forwardMessages(selected.id, Array.from(forwardSelected), toContactId);
+      const res = await forwardMessages(selected.id, Array.from(forwardSelected), toContactId);
       setForwardMode(false);
       setForwardSelected(new Set());
       setShowForwardPicker(false);
+      setBotToast(`Переслано ${res.forwarded_count} сообщ.`);
     } catch (e: any) { alert(e.message); }
   };
 

@@ -737,30 +737,35 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
     if not tg_msg_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid messages to forward")
 
-    fwd_ids = await forward_message(
-        source.tg_account_id, source.real_tg_id, tg_msg_ids, target.real_tg_id,
-    )
-
-    # Save forwarded messages in CRM — carry over content + media from source
-    saved = []
-    for i, fwd_tg_id in enumerate(fwd_ids):
-        src = src_messages[i] if i < len(src_messages) else None
-        fwd_msg = Message(
-            contact_id=target.id,
-            tg_message_id=fwd_tg_id,
-            direction="outgoing",
-            content=src.content if src else None,
-            media_type=src.media_type if src else None,
-            media_path=src.media_path if src else None,
-            sent_by=user.id,
-            forwarded_from_alias=source.alias,
-        )
-        db.add(fwd_msg)
-        saved.append(fwd_msg)
+    # Forward one by one, saving each immediately to prevent outgoing handler duplication
+    saved_count = 0
+    for i, tg_msg_id in enumerate(tg_msg_ids):
+        try:
+            fwd_tg_ids = await forward_message(
+                source.tg_account_id, source.real_tg_id, [tg_msg_id], target.real_tg_id,
+            )
+            for fwd_tg_id in fwd_tg_ids:
+                src = src_messages[i] if i < len(src_messages) else None
+                fwd_msg = Message(
+                    contact_id=target.id,
+                    tg_message_id=fwd_tg_id,
+                    direction="outgoing",
+                    content=src.content if src else None,
+                    media_type=src.media_type if src else None,
+                    media_path=src.media_path if src else None,
+                    sent_by=user.id,
+                    forwarded_from_alias=source.alias,
+                )
+                db.add(fwd_msg)
+                # Commit immediately so outgoing handler finds it and skips
+                await db.commit()
+                saved_count += 1
+        except Exception as e:
+            print(f"[FORWARD] Failed msg {tg_msg_id}: {e}")
 
     target.last_message_at = func.now()
     await db.commit()
-    return {"status": "ok", "forwarded_count": len(fwd_ids)}
+    return {"status": "ok", "forwarded_count": saved_count}
 
 
 @app.post("/api/messages/{contact_id}/press-button")
