@@ -121,8 +121,8 @@ function ChatsContent() {
   const selectedRef = useRef<Contact | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  // Track last message ID to detect genuinely NEW messages (not polling replacements)
-  const lastMsgCountRef = useRef(0);
+  // Scroll control — only scroll explicitly, never on re-render
+  const shouldScrollRef = useRef<"instant" | "smooth" | null>(null);
 
   useEffect(() => { api("/api/pinned").then((ids: string[]) => setPinned(new Set(ids))).catch(console.error); }, []);
   useEffect(() => {
@@ -153,11 +153,16 @@ function ChatsContent() {
             .sort((a, b) => (b.last_message_at || "").localeCompare(a.last_message_at || ""))
         );
         if (isCurrentChat) {
+          // Check if near bottom BEFORE adding message
+          const container = messagesContainerRef.current;
+          if (container) {
+            const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+            if (isNearBottom) shouldScrollRef.current = "smooth";
+          }
           setMessages((prev) => {
             if (prev.some((m) => m.id === event.message.id)) return prev;
             return [...prev, event.message];
           });
-          // Mark as read immediately since user is viewing this chat
           api(`/api/messages/${event.contact_id}/read`, { method: "PATCH" }).catch(console.error);
         } else {
           // Mark as unread + increment count
@@ -210,9 +215,11 @@ function ChatsContent() {
       if (cancelled) return;
       try {
         const msgs = await api(`/api/messages/${selectedId}`);
-        if (!cancelled && msgs) setMessages(msgs);
+        if (!cancelled && msgs) {
+          shouldScrollRef.current = "instant";
+          setMessages(msgs);
+        }
       } catch {
-        // Retry up to 3 times with backoff
         if (!cancelled && attempt < 3) {
           setTimeout(() => loadMessages(attempt + 1), 1000 * (attempt + 1));
         }
@@ -262,36 +269,14 @@ function ChatsContent() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [selectedId]);
 
-  const justOpenedChat = useRef(false);
-
-  // When selecting a new chat, flag so first message load scrolls to bottom
+  // Scroll after render — only when explicitly requested
   useEffect(() => {
-    if (selectedId) justOpenedChat.current = true;
-  }, [selectedId]);
-
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    if (messages.length === 0) { lastMsgCountRef.current = 0; return; }
-
-    // Always scroll to bottom when chat first opens
-    if (justOpenedChat.current) {
-      justOpenedChat.current = false;
-      lastMsgCountRef.current = messages.length;
-      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-      return;
-    }
-
-    // Only auto-scroll if new messages were ADDED (not polling replacement)
-    const hadNewMessages = messages.length > lastMsgCountRef.current;
-    lastMsgCountRef.current = messages.length;
-    if (!hadNewMessages) return;
-
-    // Auto-scroll only if user is near the bottom (within 150px)
-    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
-    if (isNearBottom) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
+    if (!shouldScrollRef.current || messages.length === 0) return;
+    const behavior = shouldScrollRef.current;
+    shouldScrollRef.current = null;
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior });
+    });
   }, [messages]);
 
   // Clear translations when language changes
