@@ -302,6 +302,7 @@ function ChatsContent() {
   // User info panel
   const [showUserInfo, setShowUserInfo] = useState(false);
   const [userInfoTab, setUserInfoTab] = useState<"media" | "notes" | "postbacks">("media");
+  const [mediaSubTab, setMediaSubTab] = useState<"photos" | "videos" | "files" | "voice">("photos");
   const [contactNotes, setContactNotes] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
 
@@ -2086,63 +2087,73 @@ function ChatsContent() {
             {userInfoTab === "media" && (() => {
               const mediaMessages = messages.filter((m) => m.media_path && m.media_type && m.media_type !== "sticker");
               const photos = mediaMessages.filter((m) => m.media_type === "photo" || (m.media_type === "document" && (() => { const ext = (m.media_path || "").split(".").pop()?.toLowerCase() || ""; return ["jpg","jpeg","png","gif","webp"].includes(ext); })()));
-              const videos = mediaMessages.filter((m) => m.media_type === "video");
+              const videos = mediaMessages.filter((m) => m.media_type === "video" && !(m.media_path || "").endsWith(".webm"));
               const files = mediaMessages.filter((m) => m.media_type === "document" && !photos.includes(m));
               const voices = mediaMessages.filter((m) => m.media_type === "voice");
+              const subTabs = [
+                { key: "photos" as const, label: "Фото", count: photos.length },
+                { key: "videos" as const, label: "Видео", count: videos.length },
+                { key: "files" as const, label: "Файлы", count: files.length },
+                { key: "voice" as const, label: "Голос", count: voices.length },
+              ];
               return (
-                <div className="space-y-4">
-                  {photos.length > 0 && (
-                    <div>
-                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Фото ({photos.length})</div>
+                <div>
+                  <div className="flex gap-1 mb-3 bg-surface border border-surface-border rounded-lg p-0.5">
+                    {subTabs.map((st) => (
+                      <button
+                        key={st.key}
+                        onClick={() => setMediaSubTab(st.key)}
+                        className={`flex-1 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                          mediaSubTab === st.key ? "bg-brand/15 text-brand" : "text-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        {st.label} {st.count > 0 && <span className="opacity-60">({st.count})</span>}
+                      </button>
+                    ))}
+                  </div>
+
+                  {mediaSubTab === "photos" && (
+                    photos.length > 0 ? (
                       <div className="grid grid-cols-3 gap-1">
                         {photos.map((m) => (
-                          <img
-                            key={m.id}
-                            src={mediaUrl(m.media_path!)}
-                            alt=""
-                            className="w-full aspect-square object-cover rounded-lg cursor-pointer hover:opacity-80 transition-opacity"
-                            onClick={() => setLightboxSrc(mediaUrl(m.media_path!))}
-                          />
+                          <img key={m.id} src={mediaUrl(m.media_path!)} alt="" className="w-full aspect-square object-cover rounded-lg cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setLightboxSrc(mediaUrl(m.media_path!))} />
                         ))}
                       </div>
-                    </div>
+                    ) : <p className="text-xs text-slate-500 text-center py-6">Нет фотографий</p>
                   )}
-                  {videos.length > 0 && (
-                    <div>
-                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Видео ({videos.length})</div>
-                      <div className="space-y-1.5">
+
+                  {mediaSubTab === "videos" && (
+                    videos.length > 0 ? (
+                      <div className="space-y-2">
                         {videos.map((m) => (
                           <video key={m.id} src={mediaUrl(m.media_path!)} controls preload="none" className="w-full rounded-lg" />
                         ))}
                       </div>
-                    </div>
+                    ) : <p className="text-xs text-slate-500 text-center py-6">Нет видео</p>
                   )}
-                  {files.length > 0 && (
-                    <div>
-                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Файлы ({files.length})</div>
+
+                  {mediaSubTab === "files" && (
+                    files.length > 0 ? (
                       <div className="space-y-1">
                         {files.map((m) => (
                           <a key={m.id} href={mediaUrl(m.media_path!)} target="_blank" rel="noreferrer" download
-                            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-surface-border hover:border-brand/30 text-xs text-slate-300 hover:text-brand transition-colors">
+                            className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-surface-border hover:border-brand/30 text-xs text-slate-300 hover:text-brand transition-colors">
                             <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                             <span className="truncate">{m.media_path!.split("/").pop()}</span>
                           </a>
                         ))}
                       </div>
-                    </div>
+                    ) : <p className="text-xs text-slate-500 text-center py-6">Нет файлов</p>
                   )}
-                  {voices.length > 0 && (
-                    <div>
-                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Голосовые ({voices.length})</div>
-                      <div className="space-y-1.5">
+
+                  {mediaSubTab === "voice" && (
+                    voices.length > 0 ? (
+                      <div className="space-y-2">
                         {voices.map((m) => (
                           <VoicePlayer key={m.id} src={mediaUrl(m.media_path!)} direction={m.direction} />
                         ))}
                       </div>
-                    </div>
-                  )}
-                  {mediaMessages.length === 0 && (
-                    <p className="text-xs text-slate-500 text-center py-8">Нет медиа файлов</p>
+                    ) : <p className="text-xs text-slate-500 text-center py-6">Нет голосовых</p>
                   )}
                 </div>
               );
