@@ -299,6 +299,12 @@ function ChatsContent() {
   const [scheduledList, setScheduledList] = useState<any[]>([]);
   const [showScheduledList, setShowScheduledList] = useState(false);
 
+  // User info panel
+  const [showUserInfo, setShowUserInfo] = useState(false);
+  const [userInfoTab, setUserInfoTab] = useState<"media" | "notes" | "postbacks">("media");
+  const [contactNotes, setContactNotes] = useState("");
+  const [savingNotes, setSavingNotes] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<Contact | null>(null);
   const filterAccountRef = useRef<string | null>(null);
@@ -476,6 +482,8 @@ function ChatsContent() {
     setReplyTo(null);
     setForwardMode(false);
     setForwardSelected(new Set());
+    setShowUserInfo(false);
+    setContactNotes(selected?.notes || "");
     setUnread((prev) => { const n = new Map(prev); n.delete(selected.id); return n; });
     api(`/api/messages/${selected.id}/read`, { method: "PATCH" }).catch(console.error);
   }, [selected]);
@@ -1219,20 +1227,18 @@ function ChatsContent() {
                 <option value="tr">↑ TR</option>
               </select>
 
-              {/* Forward mode toggle */}
+              {/* User info toggle */}
               <button
-                onClick={() => { setForwardMode(!forwardMode); setForwardSelected(new Set()); }}
+                onClick={() => setShowUserInfo(!showUserInfo)}
                 className={`p-1.5 rounded-lg border transition-all duration-200 shrink-0 ${
-                  forwardMode
+                  showUserInfo
                     ? "bg-brand/10 border-brand/30 text-brand"
                     : "border-surface-border text-slate-500 hover:text-brand hover:border-brand/30"
                 }`}
-                title={forwardMode ? "Отмена" : "Переслать"}
+                title="Информация о контакте"
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-                  <polyline points="14 8 18 12 14 16" />
-                  <line x1="10" y1="12" x2="18" y2="12" />
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
                 </svg>
               </button>
             </div>
@@ -2020,6 +2026,168 @@ function ChatsContent() {
           </div>
         )}
       </div>
+
+      {/* User info sidebar */}
+      {showUserInfo && selected && (
+        <div className="w-72 md:w-80 border-l border-surface-border bg-surface-card/50 flex flex-col shrink-0 overflow-hidden animate-slide-right fixed md:relative inset-y-0 right-0 z-40 bg-surface-card">
+          {/* Header */}
+          <div className="p-4 border-b border-surface-border flex items-center justify-between shrink-0">
+            <span className="text-sm font-semibold">Контакт</span>
+            <button onClick={() => setShowUserInfo(false)} className="text-slate-500 hover:text-white p-1">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Avatar + name + info */}
+          <div className="p-4 flex flex-col items-center text-center border-b border-surface-border shrink-0">
+            <div className="w-16 h-16 rounded-full bg-surface border border-surface-border overflow-hidden mb-3">
+              <img
+                src={avatarUrl(selected.id)}
+                alt=""
+                className="w-full h-full object-cover"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+              />
+            </div>
+            <div className="text-sm font-semibold text-white">{selected.alias}</div>
+            {selected.real_tg_id && (
+              <div className="text-[11px] text-slate-500 mt-1">ID: {selected.real_tg_id}</div>
+            )}
+            <div className="text-[11px] text-slate-500 mt-0.5">
+              Первое сообщение: {selected.created_at ? new Date(selected.created_at).toLocaleDateString("ru-RU") : "—"}
+            </div>
+            {selected.tags.length > 0 && (
+              <div className="flex gap-1 mt-2 flex-wrap justify-center">
+                {selected.tags.map((t) => (
+                  <span key={t} className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-brand/10 text-brand border border-brand/20">{t}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Tabs */}
+          <div className="flex border-b border-surface-border shrink-0">
+            {(["media", "notes", "postbacks"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setUserInfoTab(tab)}
+                className={`flex-1 py-2 text-xs font-medium transition-colors ${
+                  userInfoTab === tab ? "text-brand border-b-2 border-brand" : "text-slate-500 hover:text-slate-300"
+                }`}
+              >
+                {tab === "media" ? "Медиа" : tab === "notes" ? "Заметки" : "Постбеки"}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          <div className="flex-1 overflow-auto p-3">
+            {userInfoTab === "media" && (() => {
+              const mediaMessages = messages.filter((m) => m.media_path && m.media_type && m.media_type !== "sticker");
+              const photos = mediaMessages.filter((m) => m.media_type === "photo" || (m.media_type === "document" && (() => { const ext = (m.media_path || "").split(".").pop()?.toLowerCase() || ""; return ["jpg","jpeg","png","gif","webp"].includes(ext); })()));
+              const videos = mediaMessages.filter((m) => m.media_type === "video");
+              const files = mediaMessages.filter((m) => m.media_type === "document" && !photos.includes(m));
+              const voices = mediaMessages.filter((m) => m.media_type === "voice");
+              return (
+                <div className="space-y-4">
+                  {photos.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Фото ({photos.length})</div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {photos.map((m) => (
+                          <img
+                            key={m.id}
+                            src={mediaUrl(m.media_path!)}
+                            alt=""
+                            className="w-full aspect-square object-cover rounded-lg cursor-pointer hover:opacity-80 transition-opacity"
+                            onClick={() => setLightboxSrc(mediaUrl(m.media_path!))}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {videos.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Видео ({videos.length})</div>
+                      <div className="space-y-1.5">
+                        {videos.map((m) => (
+                          <video key={m.id} src={mediaUrl(m.media_path!)} controls preload="none" className="w-full rounded-lg" />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {files.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Файлы ({files.length})</div>
+                      <div className="space-y-1">
+                        {files.map((m) => (
+                          <a key={m.id} href={mediaUrl(m.media_path!)} target="_blank" rel="noreferrer" download
+                            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-surface-border hover:border-brand/30 text-xs text-slate-300 hover:text-brand transition-colors">
+                            <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                            <span className="truncate">{m.media_path!.split("/").pop()}</span>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {voices.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-slate-500 font-medium mb-2 uppercase">Голосовые ({voices.length})</div>
+                      <div className="space-y-1.5">
+                        {voices.map((m) => (
+                          <VoicePlayer key={m.id} src={mediaUrl(m.media_path!)} direction={m.direction} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {mediaMessages.length === 0 && (
+                    <p className="text-xs text-slate-500 text-center py-8">Нет медиа файлов</p>
+                  )}
+                </div>
+              );
+            })()}
+
+            {userInfoTab === "notes" && (
+              <div className="space-y-3">
+                <textarea
+                  value={contactNotes}
+                  onChange={(e) => setContactNotes(e.target.value)}
+                  placeholder="Заметки об этом контакте..."
+                  rows={6}
+                  className="w-full bg-surface border border-surface-border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-brand/50 resize-none"
+                />
+                <button
+                  onClick={async () => {
+                    if (!selected) return;
+                    setSavingNotes(true);
+                    try {
+                      await api(`/api/contacts/${selected.id}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ notes: contactNotes }),
+                      });
+                    } catch (e: any) { alert(e.message); }
+                    setSavingNotes(false);
+                  }}
+                  disabled={savingNotes}
+                  className="w-full py-2 rounded-xl text-xs font-medium bg-brand/10 text-brand border border-brand/20 hover:bg-brand/20 transition-colors disabled:opacity-50"
+                >
+                  {savingNotes ? "Сохранение..." : "Сохранить заметки"}
+                </button>
+              </div>
+            )}
+
+            {userInfoTab === "postbacks" && (
+              <div className="flex flex-col items-center justify-center py-8 text-slate-500">
+                <svg className="w-8 h-8 mb-2 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><polyline points="13 2 13 9 20 9" />
+                </svg>
+                <p className="text-xs">В разработке</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Forward contact picker modal */}
       {showForwardPicker && (() => {
