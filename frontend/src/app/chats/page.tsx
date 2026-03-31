@@ -1570,7 +1570,7 @@ function ChatsContent() {
                               (ред.)
                             </button>
                           )}
-                          {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: userTimezone })}
+                          {new Date(m.created_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: userTimezone })}
                           {m.direction === "outgoing" && (
                             <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                               {m.is_read ? (
@@ -2056,7 +2056,7 @@ function ChatsContent() {
               <div className="text-[11px] text-slate-500 mt-1">ID: {selected.real_tg_id}</div>
             )}
             <div className="text-[11px] text-slate-500 mt-0.5">
-              Первое сообщение: {selected.created_at ? new Date(selected.created_at).toLocaleDateString("ru-RU") : "—"}
+              Первое сообщение: {selected.created_at ? new Date(selected.created_at).toLocaleDateString("ru-RU", { timeZone: userTimezone }) : "—"}
             </div>
             {selected.tags.length > 0 && (
               <div className="flex gap-1 mt-2 flex-wrap justify-center">

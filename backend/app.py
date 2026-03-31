@@ -298,6 +298,7 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_contacts_tg_account_id ON contacts (tg_account_id);
                 CREATE INDEX IF NOT EXISTS ix_contacts_last_message_at ON contacts (last_message_at DESC NULLS LAST);
                 CREATE INDEX IF NOT EXISTS ix_contacts_status ON contacts (status);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_tg_account_peer ON contacts (tg_account_id, real_tg_id);
                 CREATE INDEX IF NOT EXISTS ix_messages_contact_id ON messages (contact_id);
                 -- Auto-approve all pending contacts (no approval flow)
                 UPDATE contacts SET status = 'approved' WHERE status = 'pending';

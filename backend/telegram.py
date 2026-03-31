@@ -404,13 +404,24 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
         async with async_session() as db:
             # --- CONTACT LOOKUP / CREATION ---
+            # Use FOR UPDATE to prevent race conditions with parallel messages
             result = await db.execute(
                 select(Contact).where(
                     Contact.real_tg_id == peer_tg_id,
                     Contact.tg_account_id == account.id,
-                ).limit(1)
+                ).limit(1).with_for_update(skip_locked=True)
             )
             contact = result.scalars().first()
+
+            # Double-check without lock if locked row exists
+            if not contact:
+                result2 = await db.execute(
+                    select(Contact).where(
+                        Contact.real_tg_id == peer_tg_id,
+                        Contact.tg_account_id == account.id,
+                    ).limit(1)
+                )
+                contact = result2.scalars().first()
 
             is_new_contact = False
             first_name = ""
