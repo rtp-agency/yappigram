@@ -787,10 +787,18 @@ function ChatsContent() {
     setLoadingEditHistory(false);
   };
 
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB per file
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !selected) return;
-    setPendingFiles((prev) => [...prev, ...Array.from(files)].slice(0, 5));
+    const valid = Array.from(files).filter((f) => {
+      if (f.size > MAX_FILE_SIZE) {
+        alert(`Файл "${f.name}" слишком большой (${(f.size / 1024 / 1024).toFixed(1)}MB). Максимум 20MB.`);
+        return false;
+      }
+      return true;
+    });
+    setPendingFiles((prev) => [...prev, ...valid].slice(0, 5));
     e.target.value = "";
   };
 
@@ -1145,9 +1153,8 @@ function ChatsContent() {
                       >
                         {selected.alias}
                       </div>
-                      <div className="text-[10px] text-slate-500 flex items-center gap-1.5 truncate">
-                        <span title="Telegram ID">ID: {selected.real_tg_id || "—"}</span>
-                        {selected.created_at && <span>с {new Date(selected.created_at).toLocaleDateString("ru-RU", { timeZone: userTimezone })}</span>}
+                      <div className="text-[10px] text-slate-500 truncate">
+                        {selected.chat_type !== "private" ? selected.chat_type : ""}
                       </div>
                     </div>
                   </div>
@@ -2030,7 +2037,7 @@ function ChatsContent() {
 
       {/* User info sidebar */}
       {showUserInfo && selected && (
-        <div className="w-72 md:w-80 border-l border-surface-border bg-surface-card/50 flex flex-col shrink-0 overflow-hidden animate-slide-right fixed md:relative inset-y-0 right-0 z-40 bg-surface-card">
+        <div className="w-full md:w-80 border-l border-surface-border flex flex-col shrink-0 overflow-hidden animate-slide-right fixed md:relative inset-0 md:inset-y-0 md:right-0 md:left-auto z-40 bg-surface-card">
           {/* Header */}
           <div className="p-4 border-b border-surface-border flex items-center justify-between shrink-0">
             <span className="text-sm font-semibold">Контакт</span>

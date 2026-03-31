@@ -367,10 +367,12 @@ async def on_startup():
     await startup_listeners()
     asyncio.create_task(start_bot_polling())
     # Auto-sync dialogs for all connected accounts on startup
+    await ws_manager.init_redis()
     asyncio.create_task(_auto_sync_on_startup())
     asyncio.create_task(_cleanup_disconnected_accounts())
     asyncio.create_task(_process_scheduled_messages())
     asyncio.create_task(_telethon_health_monitor())
+    asyncio.create_task(_cleanup_old_media())
 
 
 @app.on_event("shutdown")
@@ -2670,6 +2672,45 @@ async def _telethon_health_monitor():
         except Exception as e:
             print(f"[HEALTH] Monitor error: {e}")
         await asyncio.sleep(60)
+
+
+async def _cleanup_old_media():
+    """Delete media files older than 60 days that are no longer needed. Runs daily."""
+    await asyncio.sleep(300)  # Wait 5 min after startup
+    while True:
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=60)
+            async with async_session() as db:
+                # Find media_paths referenced by recent messages
+                result = await db.execute(
+                    select(Message.media_path).where(
+                        Message.media_path.isnot(None),
+                        Message.created_at >= cutoff,
+                    )
+                )
+                recent_paths = {r[0] for r in result.all()}
+
+            # Scan media directory
+            import glob
+            media_files = glob.glob(os.path.join(MEDIA_DIR, "*"))
+            deleted = 0
+            for filepath in media_files:
+                filename = os.path.basename(filepath)
+                if filename in recent_paths:
+                    continue
+                # Check file age
+                try:
+                    file_age = datetime.utcnow() - datetime.fromtimestamp(os.path.getmtime(filepath))
+                    if file_age > timedelta(days=60):
+                        os.remove(filepath)
+                        deleted += 1
+                except Exception:
+                    pass
+            if deleted:
+                print(f"[MEDIA-CLEANUP] Deleted {deleted} old media files")
+        except Exception as e:
+            print(f"[MEDIA-CLEANUP] Error: {e}")
+        await asyncio.sleep(86400)  # Daily
 
 
 async def _cleanup_disconnected_accounts():
