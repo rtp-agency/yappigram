@@ -245,10 +245,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       {/* Main content */}
-      <main className={`flex-1 min-h-0 ${pathname === "/chats" ? "overflow-hidden" : "overflow-auto pb-14"} ${isTg ? "" : "md:pb-0"}`}>{children}</main>
+      <main className={`flex-1 min-h-0 ${pathname === "/chats" ? "overflow-hidden" : "overflow-auto"} ${isTg ? "" : "md:pb-0"}`} style={pathname !== "/chats" ? { paddingBottom: 52 } : undefined}>{children}</main>
 
       {/* Bottom nav */}
-      <nav className={`${isTg ? "" : "md:hidden"} fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border flex justify-around py-1 z-50`} id="bottom-nav">
+      <nav className={`${isTg ? "" : "md:hidden"} fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border flex justify-around z-50`} style={{ height: 52 }} id="bottom-nav">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = pathname.startsWith(item.href);
@@ -256,11 +256,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex flex-col items-center gap-0.5 text-[11px] transition-colors min-w-[40px] min-h-[36px] justify-center ${
+              className={`flex flex-col items-center gap-0.5 text-[10px] transition-colors min-w-[44px] h-full justify-center pt-1.5 ${
                 active ? "text-brand" : "text-slate-400"
               }`}
             >
-              <Icon className="w-4.5 h-4.5" />
+              <Icon className="w-5 h-5" />
               {item.label}
             </Link>
           );

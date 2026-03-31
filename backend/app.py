@@ -370,6 +370,7 @@ async def on_startup():
     asyncio.create_task(_auto_sync_on_startup())
     asyncio.create_task(_cleanup_disconnected_accounts())
     asyncio.create_task(_process_scheduled_messages())
+    asyncio.create_task(_telethon_health_monitor())
 
 
 @app.on_event("shutdown")
@@ -2639,12 +2640,44 @@ async def _process_scheduled_messages():
         await asyncio.sleep(30)
 
 
+async def _telethon_health_monitor():
+    """Check Telethon client connections every 60s, reconnect if needed."""
+    from telegram import _clients, _try_reconnect
+    await asyncio.sleep(30)  # Wait for startup
+    while True:
+        try:
+            for account_id, client in list(_clients.items()):
+                if not client.is_connected():
+                    async with async_session() as db:
+                        result = await db.execute(
+                            select(TgAccount).where(TgAccount.id == account_id, TgAccount.is_active.is_(True))
+                        )
+                        account = result.scalar_one_or_none()
+                        if not account:
+                            continue
+                        print(f"[HEALTH] {account.phone} disconnected, attempting reconnect...")
+                        try:
+                            new_client = await _try_reconnect(account_id)
+                            if new_client:
+                                print(f"[HEALTH] {account.phone} reconnected successfully")
+                                await ws_manager.broadcast_to_org(account.org_id, {
+                                    "type": "account_status", "account_id": str(account_id), "connected": True,
+                                })
+                            else:
+                                print(f"[HEALTH] {account.phone} reconnect failed")
+                        except Exception as e:
+                            print(f"[HEALTH] {account.phone} reconnect error: {e}")
+        except Exception as e:
+            print(f"[HEALTH] Monitor error: {e}")
+        await asyncio.sleep(60)
+
+
 async def _cleanup_disconnected_accounts():
     """Delete data for accounts disconnected more than 30 days ago. Runs daily."""
     while True:
         try:
             async with async_session() as db:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+                cutoff = datetime.utcnow() - timedelta(days=30)
                 # Find accounts disconnected > 30 days
                 result = await db.execute(
                     select(TgAccount).where(
@@ -3069,8 +3102,17 @@ async def _handle_ws(ws: WebSocket, token: str):
     await ws_manager.connect(staff_id, ws, org_id=user.postforge_org_id)
     try:
         while True:
-            data = await ws.receive_text()
-            # Handle typing indicators etc.
+            try:
+                data = await asyncio.wait_for(ws.receive_text(), timeout=45)
+                # Respond to ping with pong
+                if data == "ping":
+                    await ws.send_text("pong")
+            except asyncio.TimeoutError:
+                # Send keepalive ping if no data received
+                try:
+                    await ws.send_text('{"type":"ping"}')
+                except Exception:
+                    break
     except (WebSocketDisconnect, Exception):
         pass
     finally:

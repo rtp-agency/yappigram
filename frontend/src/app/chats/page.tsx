@@ -454,7 +454,7 @@ function ChatsContent() {
           return prev;
         });
       }).catch(() => {});
-    }, 10000);
+    }, 30000);  // 30s fallback — WS handles real-time updates
     return () => clearInterval(interval);
   }, []);
 
@@ -518,7 +518,7 @@ function ChatsContent() {
           return prev;
         });
       }).catch(() => {});
-    }, 2000);
+    }, 5000);  // 5s fallback — WS handles real-time updates
     return () => clearInterval(interval);
   }, [selected, activeTopic]);
 

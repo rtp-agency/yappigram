@@ -128,11 +128,23 @@ export async function connectWS() {
 
   _ws.onopen = () => {
     _wsRetries = 0;
+    // Send ping every 30s to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (_ws?.readyState === WebSocket.OPEN) {
+        _ws.send("ping");
+      } else {
+        clearInterval(pingInterval);
+      }
+    }, 30000);
   };
 
   _ws.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    _handlers.forEach((h) => h(data));
+    try {
+      if (e.data === "pong") return; // Ignore pong responses
+      const data = JSON.parse(e.data);
+      if (data.type === "ping") return; // Ignore server pings
+      _handlers.forEach((h) => h(data));
+    } catch { /* ignore parse errors */ }
   };
 
   _ws.onclose = () => {
