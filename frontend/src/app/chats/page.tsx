@@ -203,7 +203,10 @@ function ChatsContent() {
   // Bot callback toast
   const [botToast, setBotToast] = useState<string | null>(null);
   // User timezone for formatting times
-  const [userTimezone, setUserTimezone] = useState("UTC");
+  const [userTimezone, setUserTimezone] = useState(() => {
+    if (typeof window === "undefined") return "UTC";
+    return sessionStorage.getItem("crm_timezone") || "UTC";
+  });
 
   // Create group
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -317,7 +320,10 @@ function ChatsContent() {
   useEffect(() => {
     api("/api/staff/me").then((me: any) => {
       if (me?.role) setRole(me.role);
-      if (me?.timezone) setUserTimezone(me.timezone);
+      if (me?.timezone) {
+        setUserTimezone(me.timezone);
+        try { sessionStorage.setItem("crm_timezone", me.timezone); } catch {}
+      }
     }).catch(() => {});
   }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
