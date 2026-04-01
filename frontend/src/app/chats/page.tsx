@@ -2004,8 +2004,22 @@ function ChatsContent() {
                   className="flex-1 bg-transparent py-3 text-sm focus:outline-none placeholder:text-slate-600 resize-none max-h-32 overflow-y-auto"
                   style={{ height: "auto" }}
                   onFocus={() => {
-                    // On mobile, scroll messages to bottom when keyboard opens
-                    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 400);
+                    // On mobile, scroll to bottom after keyboard opens
+                    // Multiple delays to catch different keyboard animation speeds
+                    for (const delay of [100, 300, 500, 800]) {
+                      setTimeout(() => {
+                        messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+                        // Also ensure input is visible
+                        if (window.visualViewport) {
+                          const vv = window.visualViewport;
+                          document.documentElement.style.height = `${vv.height}px`;
+                        }
+                      }, delay);
+                    }
+                  }}
+                  onBlur={() => {
+                    // Reset height when keyboard closes
+                    document.documentElement.style.height = "";
                   }}
                   onInput={(e) => {
                     const target = e.target as HTMLTextAreaElement;

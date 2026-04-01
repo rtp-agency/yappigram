@@ -6,6 +6,8 @@ html, body {
   overscroll-behavior: none;
   -webkit-text-size-adjust: 100%;
   touch-action: manipulation;
+  height: 100%;
+  margin: 0;
 }
 
 body {
@@ -58,10 +60,14 @@ body {
   will-change: transform, opacity;
 }
 
-/* Fix mobile keyboard pushing input — scroll into view on focus */
 @media (max-width: 768px) {
   /* Prevent iOS zoom on input focus (requires 16px minimum) */
   input, textarea, select {
     font-size: 16px !important;
+  }
+  /* Ensure content fits visual viewport when keyboard is open */
+  html {
+    height: 100vh;
+    height: 100dvh;
   }
 }

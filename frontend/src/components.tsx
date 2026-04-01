@@ -248,7 +248,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className={`flex-1 min-h-0 ${pathname === "/chats" ? "overflow-hidden" : "overflow-auto"} ${isTg ? "" : "md:pb-0"}`} style={pathname !== "/chats" ? { paddingBottom: 52 } : undefined}>{children}</main>
 
       {/* Bottom nav */}
-      <nav className={`${isTg ? "" : "md:hidden"} fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border flex justify-around z-50`} style={{ height: 52 }} id="bottom-nav">
+      <nav className={`${isTg ? "" : "md:hidden"} ${isEmbedded && !isTg ? "hidden md:hidden" : ""} fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border flex justify-around z-50`} style={{ height: 52 }} id="bottom-nav">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = pathname.startsWith(item.href);
