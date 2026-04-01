@@ -844,17 +844,17 @@ async def list_contacts(
             .subquery()
         )
         msg_result = await db.execute(
-            select(Message.contact_id, Message.content, Message.media_type, Message.direction)
+            select(Message.contact_id, Message.content, Message.media_type, Message.direction, Message.is_read)
             .join(latest_sub, (Message.contact_id == latest_sub.c.contact_id) & (Message.created_at == latest_sub.c.max_ts))
         )
         for row in msg_result.all():
             cid = row[0]
             if cid in last_msg_map:
-                continue  # Dedupe (multiple msgs at same timestamp)
+                continue
             content = row[1]
             if not content and row[2]:
                 content = f"[{row[2]}]"
-            last_msg_map[cid] = ((content or "")[:100], row[3])
+            last_msg_map[cid] = ((content or "")[:100], row[3], row[4])
 
     last_msg_dir_map: dict = {}
     for c in contacts:
@@ -871,9 +871,11 @@ async def list_contacts(
         if entry:
             c.last_message_content = entry[0]
             c.last_message_direction = entry[1]
+            c.last_message_is_read = entry[2]
         else:
             c.last_message_content = None
             c.last_message_direction = None
+            c.last_message_is_read = None
 
     return contacts
 

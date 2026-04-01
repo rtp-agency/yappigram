@@ -319,6 +319,7 @@ export interface Contact {
   last_message_at: string | null;
   last_message_content: string | null;
   last_message_direction: string | null;
+  last_message_is_read: boolean | null;
 }
 
 export interface Message {

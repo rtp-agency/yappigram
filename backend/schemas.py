@@ -94,6 +94,7 @@ class ContactOut(BaseModel):
     last_message_at: datetime | None
     last_message_content: str | None = None
     last_message_direction: str | None = None
+    last_message_is_read: bool | None = None
 
     model_config = {"from_attributes": True}
 

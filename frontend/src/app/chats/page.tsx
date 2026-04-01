@@ -317,7 +317,10 @@ function ChatsContent() {
   useEffect(() => { api("/api/pinned").then((ids: string[]) => setPinned(new Set(ids))).catch(console.error); }, []);
   // Sync role from server (in case localStorage is stale)
   useEffect(() => {
-    api("/api/staff/me").then((me: any) => { if (me?.role) setRole(me.role); if (me?.timezone) setUserTimezone(me.timezone); }).catch(() => {});
+    api("/api/staff/me").then((me: any) => {
+      if (me?.role) setRole(me.role);
+      if (me?.timezone && me.timezone !== "UTC") setUserTimezone(me.timezone);
+    }).catch(() => {});
   }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { filterAccountRef.current = filterAccountId; }, [filterAccountId]);
@@ -386,7 +389,7 @@ function ChatsContent() {
           const msgPreview = event.message?.content || (event.message?.media_type ? `[${event.message.media_type}]` : "") || "";
           const msgDir = event.message?.direction || "incoming";
           return prev
-            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100), last_message_direction: msgDir } : c);
+            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: msgPreview.slice(0, 100), last_message_direction: msgDir, last_message_is_read: false } : c);
         });
         if (isCurrentChat) {
           setMessages((prev) => {
@@ -431,6 +434,10 @@ function ChatsContent() {
         setMessages((prev) =>
           prev.map((m) => readIds.has(m.id) ? { ...m, is_read: true } : m)
         );
+        // Update contact preview checkmarks
+        if (event.contact_id) {
+          setContacts((prev) => prev.map((c) => c.id === event.contact_id ? { ...c, last_message_is_read: true } : c));
+        }
       }
       if (event.type === "contact_deleted") {
         setContacts((prev) => prev.filter((c) => c.id !== event.contact_id));
@@ -663,7 +670,7 @@ function ChatsContent() {
       }
       // Move this chat to top + update last message preview
       setContacts((prev) => prev
-        .map((c: Contact) => c.id === selected.id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: (savedText || "[media]").slice(0, 100), last_message_direction: "outgoing" } : c)
+        .map((c: Contact) => c.id === selected.id ? { ...c, last_message_at: new Date().toISOString(), last_message_content: (savedText || "[media]").slice(0, 100), last_message_direction: "outgoing", last_message_is_read: false } : c)
       );
     } catch (e: any) {
       // Restore text on failure
@@ -1035,11 +1042,22 @@ function ChatsContent() {
                       )}
                     </div>
                     {c.last_message_content && (
-                      <p className={`text-xs truncate mt-0.5 ${
+                      <p className={`text-xs truncate mt-0.5 flex items-center gap-1 ${
                         !unread.has(c.id) && c.last_message_direction === "incoming"
                           ? "text-white font-medium"
                           : "text-slate-500"
-                      }`}>{c.last_message_content}</p>
+                      }`}>
+                        {c.last_message_direction === "outgoing" && (
+                          <svg className={`w-3.5 h-3.5 shrink-0 ${c.last_message_is_read ? "text-sky-400" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            {c.last_message_is_read ? (
+                              <><polyline points="1 12 5 16 12 6" /><polyline points="8 12 12 16 20 6" /></>
+                            ) : (
+                              <polyline points="4 12 9 17 20 6" />
+                            )}
+                          </svg>
+                        )}
+                        <span className="truncate">{c.last_message_content}</span>
+                      </p>
                     )}
                   </div>
                 </div>
