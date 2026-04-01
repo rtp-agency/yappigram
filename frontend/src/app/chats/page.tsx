@@ -203,7 +203,9 @@ function ChatsContent() {
   // Bot callback toast
   const [botToast, setBotToast] = useState<string | null>(null);
   // User timezone for formatting times
-  const [userTimezone, setUserTimezone] = useState("UTC");
+  const [userTimezone, setUserTimezone] = useState(() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return "UTC"; }
+  });
 
   // Create group
   const [showCreateGroup, setShowCreateGroup] = useState(false);
