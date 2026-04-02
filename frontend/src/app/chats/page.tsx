@@ -1923,10 +1923,11 @@ function ChatsContent() {
                     <button
                       onClick={async (e) => {
                         e.stopPropagation();
-                        if (!text.trim()) return;
+                        const currentText = textRef.current.trim();
+                        if (!currentText) return;
                         setTranslatingInput(true);
                         try {
-                          const result = await translateText(text, translateLangOut);
+                          const result = await translateText(currentText, translateLangOut);
                           setText(result.translated);
                         } catch (err: any) { alert(err.message); }
                         setTranslatingInput(false);
