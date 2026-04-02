@@ -222,8 +222,8 @@ function ChatsContent() {
   const [botToast, setBotToast] = useState<string | null>(null);
   // User timezone for formatting times
   const [userTimezone, setUserTimezone] = useState(() => {
-    if (typeof window === "undefined") return "UTC";
-    return localStorage.getItem("crm_timezone") || "UTC";
+    if (typeof window === "undefined") return "Europe/Moscow";
+    return localStorage.getItem("crm_timezone") || "Europe/Moscow";
   });
 
   // Create group
