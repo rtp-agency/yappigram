@@ -193,7 +193,16 @@ function ChatsContent() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, _setText] = useState("");
   const textRef = useRef("");
-  const setText = (val: string) => { textRef.current = val; _setText(val); };
+  const setText = (val: string) => {
+    textRef.current = val;
+    _setText(val);
+    // Sync uncontrolled textarea
+    if (inputRef.current && inputRef.current.value !== val) {
+      inputRef.current.value = val;
+      inputRef.current.style.height = "auto";
+      inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 128) + "px";
+    }
+  };
   const [search, setSearch] = useState("");
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState("");
@@ -2006,11 +2015,15 @@ function ChatsContent() {
 
                 <textarea
                   ref={inputRef}
-                  value={text}
+                  defaultValue={text}
                   onChange={(e) => {
                     const val = e.target.value;
-                    setText(val);
-                    // Auto-show templates when typing / (only toggle when state actually changes)
+                    textRef.current = val;
+                    // Debounced state update — only update when needed for UI elements
+                    const hasRealText = val.replace(/[\s\d]/g, "").length > 0;
+                    const hadRealText = text.replace(/[\s\d]/g, "").length > 0;
+                    if (hasRealText !== hadRealText) _setText(val);
+                    // Template toggle
                     const shouldShow = val.startsWith("/") && val.length >= 1;
                     if (shouldShow && !showTemplates) {
                       setShowTemplates(true);

@@ -761,7 +761,7 @@ async def tg_disconnect(account_id: UUID, user: CurrentUser, db: DB):
 
     # Mark as inactive with timestamp (data kept for 30 days)
     account.is_active = False
-    account.disconnected_at = datetime.now(timezone.utc)
+    account.disconnected_at = datetime.utcnow()
 
     # Unlink from staff
     await db.execute(sa_delete(StaffTgAccount).where(StaffTgAccount.tg_account_id == account_id))
