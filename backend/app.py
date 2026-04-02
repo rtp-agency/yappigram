@@ -700,19 +700,22 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
 # Telegram Accounts
 # ============================================================
 
-MAX_TG_ACCOUNTS = 5  # test version limit
+MAX_TG_ACCOUNTS = 50
 
 @app.post("/api/tg/connect")
 async def tg_connect(req: TgConnectRequest, request: Request, user: AdminUser, db: DB):
     check_rate_limit(request)
     # Check account limit
     count = await db.execute(
-        select(func.count(TgAccount.id)).where(TgAccount.org_id == _org_id(user))
+        select(func.count(TgAccount.id)).where(TgAccount.org_id == _org_id(user), TgAccount.is_active.is_(True))
     )
     if count.scalar() >= MAX_TG_ACCOUNTS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Максимум {MAX_TG_ACCOUNTS} аккаунтов")
-    result = await start_connect(req.phone)
-    return {"status": "code_sent", "debug": result}
+    try:
+        result = await start_connect(req.phone)
+        return {"status": "code_sent", "debug": result}
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Ошибка подключения: {str(e)[:200]}")
 
 
 @app.post("/api/tg/verify", response_model=TgAccountOut)
