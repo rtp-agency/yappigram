@@ -176,14 +176,46 @@ async def serve_media(file_path: str):
     if ext in (".html", ".htm", ".svg"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "File type not allowed")
 
-    content_type = mimetypes.guess_type(safe_path)[0] or "application/octet-stream"
+    content_type = mimetypes.guess_type(safe_path)[0]
+    # If no extension, try to detect from file header (magic bytes)
+    if not content_type or content_type == "application/octet-stream":
+        try:
+            with open(safe_path, "rb") as f:
+                header = f.read(16)
+            if header[:8] == b'\x89PNG\r\n\x1a\n':
+                content_type = "image/png"
+            elif header[:3] == b'\xff\xd8\xff':
+                content_type = "image/jpeg"
+            elif header[:4] == b'GIF8':
+                content_type = "image/gif"
+            elif header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+                content_type = "image/webp"
+            elif header[:4] == b'\x1aE\xdf\xa3':
+                content_type = "video/webm"
+            elif header[:3] == b'OGG' or header[:4] == b'OggS':
+                content_type = "audio/ogg"
+            elif header[:4] == b'%PDF':
+                content_type = "application/pdf"
+            elif header[:2] == b'PK':
+                # ZIP-based (docx, xlsx, zip)
+                fname = os.path.basename(safe_path).lower()
+                if 'doc' in fname:
+                    content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                else:
+                    content_type = "application/zip"
+            elif header[:4] in (b'\x00\x00\x00\x18', b'\x00\x00\x00\x1c', b'\x00\x00\x00 '):
+                content_type = "video/mp4"
+            else:
+                content_type = "application/octet-stream"
+        except Exception:
+            content_type = "application/octet-stream"
     # Override dangerous content types
     if content_type in ("text/html", "image/svg+xml", "application/javascript"):
         content_type = "application/octet-stream"
 
-    # Images served inline, everything else as attachment
-    is_image = content_type.startswith("image/")
-    disposition = "inline" if is_image else "attachment"
+    # Images and video served inline, documents as attachment
+    is_inline = content_type.startswith("image/") or content_type.startswith("video/") or content_type.startswith("audio/")
+    disposition = "inline" if is_inline else "attachment"
     raw_filename = os.path.basename(safe_path)
     # Strip UUID_msgid prefix from document filenames (e.g. "abc123_456_report.pdf" -> "report.pdf")
     # Telethon saves as "{contactid}_{msgid}{ext}" but for documents may produce "{contactid}_{msgid}_originalname.ext"

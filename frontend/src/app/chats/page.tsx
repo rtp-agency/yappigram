@@ -1548,7 +1548,8 @@ function ChatsContent() {
                             {m.media_type === "document" && (() => {
                               const fname = m.media_path!.split('/').pop() || '';
                               const ext = fname.split('.').pop()?.toLowerCase() || '';
-                              const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext) || fname.startsWith('photo_');
+                              const hasNoExt = !ext || ext === fname.split('.').pop();
+                              const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext) || fname.startsWith('photo_') || hasNoExt;
                               return isImage ? (
                                 <img
                                   src={mediaUrl(m.media_path!)}
