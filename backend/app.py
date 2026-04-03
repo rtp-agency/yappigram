@@ -1660,9 +1660,60 @@ async def send_template_media(contact_id: UUID, user: CurrentUser, db: DB, templ
     return msg
 
 
+@app.post("/api/messages/{contact_id}/send-template-block")
+async def send_template_single_block(
+    contact_id: UUID, user: CurrentUser, db: DB,
+    template_id: UUID = Query(...),
+    block_index: int = Query(..., description="Index of the block to send"),
+):
+    """Send a single block from a template."""
+    contact = await _get_contact_with_access(contact_id, user, db)
+    if contact.status != "approved":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
+    result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id))
+    tpl = result.scalar_one_or_none()
+    if not tpl or not tpl.blocks_json:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if block_index < 0 or block_index >= len(tpl.blocks_json):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid block index")
+    block = tpl.blocks_json[block_index]
+    text = block.get("content") or None
+    media_type = block.get("media_type") or block.get("type")
+    if media_type == "text":
+        media_type = None
+    block_media_path = os.path.join(MEDIA_DIR, block["media_path"]) if block.get("media_path") else None
+    if not text and not block_media_path:
+        return {"status": "skipped"}
+    # Retry on SQLite lock
+    tg_msg_id = None
+    for attempt in range(5):
+        try:
+            tg_msg_id = await send_message(
+                contact.tg_account_id, contact.real_tg_id,
+                text=text, file_path=block_media_path,
+                media_type=media_type if block_media_path else None,
+            )
+            break
+        except Exception as e:
+            if "database is locked" in str(e) and attempt < 4:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    msg = Message(
+        contact_id=contact.id, tg_message_id=tg_msg_id, direction="outgoing",
+        content=text, media_type=media_type if block_media_path else None,
+        media_path=block.get("media_path"), sent_by=user.id,
+    )
+    db.add(msg)
+    contact.last_message_at = func.now()
+    await db.commit()
+    await db.refresh(msg)
+    return msg
+
+
 @app.post("/api/messages/{contact_id}/send-template-blocks")
 async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, template_id: UUID = Query(...)):
-    """Send a multi-block template: each block sent as a separate message with delays."""
+    """Send all blocks at once (no delays). Use send-template-block for individual blocks with client delays."""
     contact = await _get_contact_with_access(contact_id, user, db)
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
@@ -2171,7 +2222,7 @@ async def template_upload_media(
             subprocess.run([
                 "ffmpeg", "-y", "-i", filepath,
                 "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-c:a", "aac", "-b:a", "128k",
                 "-f", "mp4", out_path,
             ], check=True, timeout=120, capture_output=True)
             filename = f"template_{template_id}_circle.mp4"
@@ -2249,7 +2300,7 @@ async def template_upload_block_media(
             subprocess.run([
                 "ffmpeg", "-y", "-i", filepath,
                 "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-c:a", "aac", "-b:a", "128k",
                 "-f", "mp4", out_path,
             ], check=True, timeout=120, capture_output=True)
             filename = f"tplblock_{template_id}_{block_id}_circle.mp4"

@@ -694,17 +694,30 @@ function ChatsContent() {
     setShowTemplates(false);
     if (!selected) return;
 
-    // New block-based templates
+    // New block-based templates — send blocks one by one with delays visible in CRM
     if (tpl.blocks_json && tpl.blocks_json.length > 0) {
       sendingRef.current = true;
       setSending(true);
       try {
-        await api(`/api/messages/${selected.id}/send-template-blocks?template_id=${tpl.id}`, {
-          method: "POST",
-        });
-        // Reload all messages to get complete data
-        const fresh = await api(`/api/messages/${selected.id}?limit=200`);
-        if (Array.isArray(fresh)) setMessages(fresh);
+        for (let i = 0; i < tpl.blocks_json.length; i++) {
+          const block = tpl.blocks_json[i];
+          if (!block.content && !block.media_path) continue;
+
+          // Wait delay from previous block
+          if (i > 0) {
+            const prevDelay = tpl.blocks_json[i - 1].delay_after || 0;
+            if (prevDelay > 0) await new Promise(r => setTimeout(r, prevDelay * 1000));
+          }
+
+          // Send single block via dedicated endpoint
+          await api(`/api/messages/${selected.id}/send-template-block?template_id=${tpl.id}&block_index=${i}`, {
+            method: "POST",
+          });
+
+          // Reload messages after each block so user sees them appear
+          const fresh = await api(`/api/messages/${selected.id}?limit=200`);
+          if (Array.isArray(fresh)) setMessages(fresh);
+        }
       } catch (e: any) { alert(e.message); }
       sendingRef.current = false;
       setSending(false);
