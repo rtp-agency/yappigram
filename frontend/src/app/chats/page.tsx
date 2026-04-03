@@ -1550,6 +1550,11 @@ function ChatsContent() {
                             {m.media_type === "video" && (
                               <video src={mediaUrl(m.media_path)} controls preload="none" className="rounded-xl max-w-full max-h-64" />
                             )}
+                            {m.media_type === "video_note" && (
+                              <div className="w-48 h-48 rounded-full overflow-hidden border-2 border-brand/30">
+                                <video src={mediaUrl(m.media_path)} controls preload="none" className="w-full h-full object-cover" style={{ borderRadius: "50%" }} />
+                              </div>
+                            )}
                             {m.media_type === "voice" && (
                               <VoicePlayer src={mediaUrl(m.media_path)} direction={m.direction} />
                             )}

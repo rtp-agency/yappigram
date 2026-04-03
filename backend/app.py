@@ -1678,12 +1678,6 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
 
     sent_messages = []
     for i, block in enumerate(blocks):
-        # Wait delay from previous block
-        if i > 0:
-            delay = blocks[i - 1].get("delay_after", 0)
-            if delay and delay > 0:
-                await asyncio.sleep(min(delay, 30))  # cap at 30s
-
         block_media_path = None
         if block.get("media_path"):
             block_media_path = os.path.join(MEDIA_DIR, block["media_path"])
@@ -1699,7 +1693,8 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
 
         # Retry on SQLite lock (Telethon session file contention)
         tg_msg_id = None
-        for attempt in range(3):
+        last_err = None
+        for attempt in range(5):
             try:
                 tg_msg_id = await send_message(
                     contact.tg_account_id, contact.real_tg_id,
@@ -1709,10 +1704,13 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
                 )
                 break
             except Exception as e:
-                if "database is locked" in str(e) and attempt < 2:
-                    await asyncio.sleep(1)
+                last_err = e
+                if "database is locked" in str(e) and attempt < 4:
+                    await asyncio.sleep(1.5 * (attempt + 1))
                     continue
                 raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Block {i+1} failed: {e}")
+        if tg_msg_id is None:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Block {i+1} failed after retries: {last_err}")
 
         msg = Message(
             contact_id=contact.id,
@@ -1725,9 +1723,9 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
         )
         db.add(msg)
         sent_messages.append(msg)
-        # Small gap between sends to avoid SQLite lock
+        # Gap between sends to let Telethon SQLite session flush
         if i < len(blocks) - 1:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
 
     contact.last_message_at = func.now()
     await db.commit()
