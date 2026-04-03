@@ -200,7 +200,7 @@ export default function LoginPage() {
               Не удалось авторизоваться. Войдите через METRA AI.
             </p>
             <button
-              onClick={() => { try { window.parent.location.href = "/"; } catch { window.location.href = "https://metra-ai.org"; } }}
+              onClick={() => { window.location.href = "https://metra-ai.org"; }}
               className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand/10 border border-brand/20 text-brand text-sm font-medium rounded-xl hover:bg-brand/20 transition-all"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
