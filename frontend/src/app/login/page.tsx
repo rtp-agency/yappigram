@@ -27,6 +27,8 @@ export default function LoginPage() {
       clearTokens();
       const role = hashParams?.get("role") || params.get("role") || "operator";
       saveTokens({ access_token: accessToken, refresh_token: refreshToken, role });
+      // Mark as coming from PostForge so AppShell shows "back to dashboard" instead of "logout"
+      try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {}
       const base = window.location.pathname.split("/login")[0] || "";
       window.location.href = base + "/chats/";
       return;

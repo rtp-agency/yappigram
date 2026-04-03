@@ -220,7 +220,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           {isEmbedded ? (
             <button
-              onClick={() => { try { window.parent.location.href = "/"; } catch { window.location.href = "https://metra-ai.org"; } }}
+              onClick={() => { window.location.href = "https://metra-ai.org"; }}
               className="flex items-center gap-2 text-sm text-emerald-400 hover:text-emerald-300 transition-colors mt-auto px-3 py-2"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
