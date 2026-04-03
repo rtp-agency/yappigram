@@ -368,11 +368,15 @@ async def on_startup():
     asyncio.create_task(start_bot_polling())
     # Auto-sync dialogs for all connected accounts on startup
     await ws_manager.init_redis()
-    asyncio.create_task(_auto_sync_on_startup())
-    asyncio.create_task(_cleanup_disconnected_accounts())
-    asyncio.create_task(_process_scheduled_messages())
-    asyncio.create_task(_telethon_health_monitor())
-    asyncio.create_task(_cleanup_old_media())
+    from tasks import (
+        auto_sync_on_startup, cleanup_disconnected_accounts,
+        process_scheduled_messages, telethon_health_monitor, cleanup_old_media,
+    )
+    asyncio.create_task(auto_sync_on_startup())
+    asyncio.create_task(cleanup_disconnected_accounts())
+    asyncio.create_task(process_scheduled_messages())
+    asyncio.create_task(telethon_health_monitor())
+    asyncio.create_task(cleanup_old_media())
 
 
 @app.on_event("shutdown")
@@ -2575,7 +2579,7 @@ async def _run_broadcast(broadcast_id: UUID):
 
 
 # ============================================================
-# Load Old Dialogs
+# Background Tasks (legacy — now also in tasks.py, these remain for compatibility)
 # ============================================================
 
 async def _auto_sync_on_startup():
