@@ -1,11 +1,12 @@
 """Background tasks for YappiGram CRM.
 
 All long-running asyncio tasks:
-- _auto_sync_on_startup: sync TG dialogs on startup
-- _process_scheduled_messages: send due scheduled messages every 30s
-- _telethon_health_monitor: check Telethon connections every 60s
-- _cleanup_old_media: delete old media files daily
-- _cleanup_disconnected_accounts: purge data for accounts disconnected >30 days
+- auto_sync_on_startup: sync TG dialogs on startup
+- process_scheduled_messages: send due scheduled messages every 30s
+- telethon_health_monitor: check Telethon connections every 60s
+- periodic_sync: re-sync dialogs + check listeners every 2 hours
+- cleanup_old_media: delete old media files daily
+- cleanup_disconnected_accounts: purge data for accounts disconnected >30 days
 """
 
 import asyncio
@@ -130,6 +131,59 @@ async def telethon_health_monitor():
         except Exception as e:
             print(f"[HEALTH] Monitor error: {e}")
         await asyncio.sleep(60)
+
+
+async def periodic_sync():
+    """Sync latest dialogs for all active accounts every 2 hours.
+
+    Catches new chats that the listener may have missed (e.g. after reconnect,
+    Telegram server issues, or network hiccups).
+    Also checks that listeners are actually running and restarts them if not.
+    """
+    SYNC_INTERVAL = 2 * 60 * 60  # 2 hours
+    await asyncio.sleep(120)  # Wait 2 min after startup (auto_sync already runs)
+    while True:
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TgAccount).where(TgAccount.is_active.is_(True))
+                )
+                accounts = result.scalars().all()
+
+            for account in accounts:
+                account_id = account.id
+                phone = account.phone
+
+                # Check if client exists and is connected
+                client = _clients.get(account_id)
+                if not client or not client.is_connected():
+                    print(f"[PERIODIC-SYNC] {phone}: client missing or disconnected, attempting reconnect...")
+                    try:
+                        new_client = await _try_reconnect(account_id)
+                        if new_client:
+                            print(f"[PERIODIC-SYNC] {phone}: reconnected, listener restarted")
+                        else:
+                            print(f"[PERIODIC-SYNC] {phone}: reconnect failed, skipping sync")
+                            continue
+                    except Exception as e:
+                        print(f"[PERIODIC-SYNC] {phone}: reconnect error: {e}")
+                        continue
+
+                # Sync latest dialogs (import from app to avoid circular import)
+                try:
+                    from app import _do_sync_dialogs
+                    imported = await _do_sync_dialogs(account_id, 100)  # Last 100 dialogs
+                    if imported and imported > 0:
+                        print(f"[PERIODIC-SYNC] {phone}: imported {imported} new dialogs")
+                except Exception as e:
+                    print(f"[PERIODIC-SYNC] {phone}: sync error: {e}")
+
+                await asyncio.sleep(5)  # Small gap between accounts
+
+            print(f"[PERIODIC-SYNC] Cycle complete for {len(accounts)} accounts")
+        except Exception as e:
+            print(f"[PERIODIC-SYNC] Error: {e}")
+        await asyncio.sleep(SYNC_INTERVAL)
 
 
 async def cleanup_old_media():

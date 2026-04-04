@@ -405,12 +405,14 @@ async def on_startup():
     from tasks import (
         auto_sync_on_startup, cleanup_disconnected_accounts,
         process_scheduled_messages, telethon_health_monitor, cleanup_old_media,
+        periodic_sync,
     )
     asyncio.create_task(auto_sync_on_startup())
     asyncio.create_task(cleanup_disconnected_accounts())
     asyncio.create_task(process_scheduled_messages())
     asyncio.create_task(telethon_health_monitor())
     asyncio.create_task(cleanup_old_media())
+    asyncio.create_task(periodic_sync())
 
 
 @app.on_event("shutdown")
