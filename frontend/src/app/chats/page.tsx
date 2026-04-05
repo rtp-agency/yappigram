@@ -191,10 +191,14 @@ function ChatsContent() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [selected, setSelected] = useState<Contact | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [text, setText] = useState("");
+  const [text, _setText_unused] = useState(""); // kept for compat, not used for rendering
   const textRef = useRef("");
-  // Keep ref in sync for async functions (sendMessage, translate)
-  useEffect(() => { textRef.current = text; }, [text]);
+  // Helper: set text in both ref and DOM input (no React re-render)
+  const setText = (val: string | ((prev: string) => string)) => {
+    const newVal = typeof val === "function" ? val(textRef.current) : val;
+    textRef.current = newVal;
+    if (inputRef.current) inputRef.current.value = newVal;
+  };
   const [search, setSearch] = useState("");
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState("");
@@ -1843,7 +1847,7 @@ function ChatsContent() {
             {showTemplates && templates.length > 0 && (() => {
               const acctFiltered = templates.filter((tpl) => {
                 if (filterAccountId && tpl.tg_account_id && tpl.tg_account_id !== filterAccountId) return false;
-                if (!text.startsWith("/")) return true;
+                if (!textRef.current.startsWith("/")) return true;
                 const q = text.toLowerCase();
                 return (tpl.shortcut && tpl.shortcut.toLowerCase().startsWith(q)) || tpl.title.toLowerCase().includes(q.slice(1));
               });
@@ -1852,7 +1856,7 @@ function ChatsContent() {
                 <div className="px-4 py-2 border-t border-surface-border bg-surface-card/50 max-h-48 overflow-auto animate-slide-up">
                   <div className="text-[10px] text-slate-500 mb-1.5 font-medium flex items-center gap-2 flex-wrap">
                     <span>Шаблоны</span>
-                    {text.startsWith("/") && <span className="text-brand">— введите шорткат и Enter</span>}
+                    {textRef.current.startsWith("/") && <span className="text-brand">— введите шорткат и Enter</span>}
                   </div>
                   {categories.length > 0 && (
                     <div className="flex gap-1 mb-1.5 flex-wrap">
@@ -2116,9 +2120,9 @@ function ChatsContent() {
 
                 <textarea
                   ref={inputRef}
-                  value={text}
+                  defaultValue=""
                   onChange={(e) => {
-                    setText(e.target.value);
+                    textRef.current = e.target.value;
                     const val = e.target.value;
                     const shouldShow = val.startsWith("/") && val.length >= 1;
                     if (shouldShow && !showTemplates) {
@@ -2164,7 +2168,7 @@ function ChatsContent() {
                 />
                 <button
                   onClick={sendMessage}
-                  disabled={(!text.trim() && pendingFiles.length === 0) || sending}
+                  disabled={sending}
                   className={`text-brand hover:text-brand-light disabled:text-slate-600 transition-colors p-2 shrink-0 ${sending ? "animate-pulse" : ""}`}
                 >
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
@@ -2673,18 +2677,18 @@ function ChatsContent() {
                 />
               </div>
             </div>
-            {!text.trim() && <p className="text-xs text-amber-400/70 mt-3">Сначала введите сообщение в поле ввода внизу</p>}
+            {!textRef.current.trim() && <p className="text-xs text-amber-400/70 mt-3">Сначала введите сообщение в поле ввода внизу</p>}
             <div className="flex gap-2 justify-end mt-4">
               <Button variant="ghost" onClick={() => setScheduleMode(false)}>Отмена</Button>
               <Button
-                disabled={!text.trim() || !scheduleDate || !scheduleTime}
+                disabled={!scheduleDate || !scheduleTime}
                 onClick={async () => {
-                  if (!selected || !text.trim() || !scheduleDate || !scheduleTime) return;
+                  if (!selected || !textRef.current.trim() || !scheduleDate || !scheduleTime) return;
                   try {
                     const sm = await api(`/api/messages/${selected.id}/schedule`, {
                       method: "POST",
                       body: JSON.stringify({
-                        content: text.trim(),
+                        content: textRef.current.trim(),
                         scheduled_at: `${scheduleDate}T${scheduleTime}:00`,
                         timezone: userTimezone,
                       }),
