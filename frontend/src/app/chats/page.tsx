@@ -1422,7 +1422,7 @@ function ChatsContent() {
                   <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
                 </div>
               )}
-              {messages.map((m) => {
+              {messages.filter(m => m.content || m.media_path || m.media_type).map((m) => {
                 const buttons = parseInlineButtons(m.inline_buttons);
                 return (
                   <div key={m.id} className="flex items-start gap-2">
@@ -1563,9 +1563,9 @@ function ChatsContent() {
                             )}
                             {m.media_type === "document" && (() => {
                               const fname = m.media_path!.split('/').pop() || '';
-                              const ext = fname.split('.').pop()?.toLowerCase() || '';
-                              const hasNoExt = !ext || ext === fname.split('.').pop();
-                              const isImage = ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext) || fname.startsWith('photo_') || hasNoExt;
+                              const ext = fname.includes('.') ? fname.split('.').pop()?.toLowerCase() || '' : '';
+                              const imageExts = ['jpg','jpeg','png','gif','webp','bmp','svg'];
+                              const isImage = imageExts.includes(ext) || fname.startsWith('photo_');
                               return isImage ? (
                                 <img
                                   src={mediaUrl(m.media_path!)}
@@ -1573,6 +1573,16 @@ function ChatsContent() {
                                   loading="lazy"
                                   className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
                                   onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                />
+                              ) : !ext ? (
+                                <img
+                                  src={mediaUrl(m.media_path!)}
+                                  alt=""
+                                  loading="lazy"
+                                  className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                  onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                                 />
                               ) : (
                                 <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" download className="flex items-center gap-2 text-brand-light hover:underline">
