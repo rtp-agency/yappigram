@@ -838,7 +838,7 @@ async def list_contacts(
     tag: str | None = None,
     tg_account_id: UUID | None = None,
     archived: bool = Query(False),
-    limit: int = Query(500, ge=1, le=1000),
+    limit: int = Query(2000, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ):
     query = select(Contact)
