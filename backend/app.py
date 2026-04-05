@@ -1242,6 +1242,42 @@ async def get_contact_topics(contact_id: UUID, user: CurrentUser, db: DB):
     return topics
 
 
+@app.post("/api/messages/{contact_id}/download-missing-media")
+async def download_missing_media_endpoint(contact_id: UUID, user: CurrentUser, db: DB):
+    """Find messages with media_type but no media_path and download from Telegram."""
+    from telegram import download_missing_media as _dl_media
+    contact = await _get_contact_with_access(contact_id, user, db)
+
+    # Find messages that have media_type but missing media_path
+    from sqlalchemy import or_
+    result = await db.execute(
+        select(Message).where(
+            Message.contact_id == contact.id,
+            Message.media_type.isnot(None),
+            Message.media_type != "sticker",
+            or_(Message.media_path.is_(None), Message.media_path == ""),
+            Message.tg_message_id.isnot(None),
+        ).order_by(Message.created_at.desc()).limit(50)
+    )
+    missing = result.scalars().all()
+    if not missing:
+        return {"downloaded": 0, "total": 0}
+
+    downloaded = 0
+    for msg in missing:
+        path = await _dl_media(
+            contact.tg_account_id, contact.real_tg_id,
+            msg.tg_message_id, contact.id,
+        )
+        if path:
+            msg.media_path = path
+            downloaded += 1
+
+    if downloaded > 0:
+        await db.commit()
+    return {"downloaded": downloaded, "total": len(missing)}
+
+
 @app.get("/api/messages/{contact_id}", response_model=list[MessageOut])
 async def get_messages(
     contact_id: UUID,

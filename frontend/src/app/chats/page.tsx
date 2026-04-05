@@ -499,6 +499,19 @@ function ChatsContent() {
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 50);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 200);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 500);
+      // Auto-download missing media in background
+      const hasMissing = msgs.some((m: any) => m.media_type && m.media_type !== "sticker" && !m.media_path);
+      if (hasMissing) {
+        api(`/api/messages/${selected.id}/download-missing-media`, { method: "POST" })
+          .then((res: any) => {
+            if (res?.downloaded > 0) {
+              // Reload messages to show downloaded media
+              api(`/api/messages/${selected.id}?limit=200`).then((fresh: Message[]) => {
+                setMessages(sortMsgs(fresh));
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+      }
     }).catch(console.error).finally(() => setLoadingMessages(false));
     if (selected.is_forum) {
       api(`/api/messages/${selected.id}/topics`).then(setTopics).catch(console.error);
@@ -1422,7 +1435,7 @@ function ChatsContent() {
                   <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
                 </div>
               )}
-              {messages.filter(m => m.content || m.media_path || m.media_type).map((m) => {
+              {messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted).map((m) => {
                 const buttons = parseInlineButtons(m.inline_buttons);
                 return (
                   <div key={m.id} className="flex items-start gap-2">
@@ -1539,6 +1552,14 @@ function ChatsContent() {
                         {m.media_type === "sticker" && (
                           <div className={`text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>Стикер {m.content || ""}</div>
                         )}
+                        {/* Loading placeholder for media being downloaded */}
+                        {m.media_type && m.media_type !== "sticker" && !m.media_path && (
+                          <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 text-xs text-slate-400">
+                            <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-400 rounded-full animate-spin" />
+                            Загрузка медиа...
+                          </div>
+                        )}
+
                         {m.media_type && m.media_type !== "sticker" && m.media_path && (
                           <div className="mb-2">
                             {m.media_type === "photo" && (

@@ -1009,6 +1009,33 @@ async def press_inline_button(
     return result.message or result.url
 
 
+async def download_missing_media(account_id: UUID, chat_tg_id: int, tg_msg_id: int, contact_id: UUID) -> str | None:
+    """Download media for a specific message from Telegram. Returns media_path or None."""
+    client = _clients.get(account_id)
+    if not client:
+        client = await _try_reconnect(account_id)
+    if not client:
+        return None
+    try:
+        msg = await asyncio.wait_for(client.get_messages(chat_tg_id, ids=tg_msg_id), timeout=15)
+        if not msg or not msg.media:
+            return None
+        media_type, ext = _extract_media(msg)
+        if not media_type:
+            return None
+        filename = f"{contact_id}_{tg_msg_id}{ext or ''}"
+        filepath = os.path.join(MEDIA_DIR, filename)
+        actual_path = await asyncio.wait_for(msg.download_media(file=filepath), timeout=60)
+        if actual_path:
+            if media_type == "photo":
+                actual_path = _compress_photo(actual_path)
+            return os.path.basename(actual_path)
+        return filename
+    except Exception as e:
+        print(f"[DOWNLOAD] Failed to download media msg={tg_msg_id}: {e}")
+        return None
+
+
 async def startup_listeners() -> None:
     """On app startup, reconnect all active TG accounts."""
     async with async_session() as db:
