@@ -427,11 +427,13 @@ export async function createTag(data: { name: string; color: string; tg_account_
   return api("/api/tags", { method: "POST", body: JSON.stringify(data) });
 }
 
-export async function fetchContacts(status?: string, tgAccountId?: string, archived?: boolean): Promise<Contact[]> {
+export async function fetchContacts(status?: string, tgAccountId?: string, archived?: boolean, search?: string, limit?: number): Promise<Contact[]> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (tgAccountId) params.set("tg_account_id", tgAccountId);
   if (archived) params.set("archived", "true");
+  if (search) params.set("search", search);
+  if (limit) params.set("limit", String(limit));
   return api(`/api/contacts?${params.toString()}`);
 }
 

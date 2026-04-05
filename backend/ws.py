@@ -73,9 +73,10 @@ class WSManager:
 
     async def send_to_staff(self, staff_id: UUID, event: dict):
         dead: list[WebSocket] = []
+        text = json.dumps(event, default=str)
         for ws in self._connections.get(staff_id, []):
             try:
-                await ws.send_text(json.dumps(event, default=str))
+                await ws.send_text(text)
             except Exception:
                 dead.append(ws)
         for ws in dead:

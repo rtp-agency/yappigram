@@ -358,6 +358,9 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_messages_unread ON messages (contact_id, direction, is_read) WHERE is_read = false AND direction = 'incoming';
                 CREATE INDEX IF NOT EXISTS ix_messages_contact_created ON messages (contact_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS ix_messages_contact_id ON messages (contact_id);
+                -- Composite index for contacts list query (most used query)
+                CREATE INDEX IF NOT EXISTS ix_contacts_account_archived_status ON contacts (tg_account_id, is_archived, status);
+                CREATE INDEX IF NOT EXISTS ix_messages_media_missing ON messages (contact_id, media_type) WHERE media_type IS NOT NULL AND media_type != 'sticker';
                 -- Auto-approve all pending contacts (no approval flow)
                 UPDATE contacts SET status = 'approved' WHERE status = 'pending';
             EXCEPTION WHEN OTHERS THEN NULL;
@@ -858,6 +861,7 @@ async def list_contacts(
     tag: str | None = None,
     tg_account_id: UUID | None = None,
     archived: bool = Query(False),
+    search: str | None = Query(None, description="Search by alias or phone"),
     limit: int = Query(2000, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ):
@@ -890,6 +894,15 @@ async def list_contacts(
         query = query.where(Contact.assigned_to == assigned_to)
     if tag:
         query = query.where(Contact.tags.any(tag))
+    if search:
+        from sqlalchemy import or_ as _or
+        search_pattern = f"%{search}%"
+        query = query.where(
+            _or(
+                Contact.alias.ilike(search_pattern),
+                Contact.phone.ilike(search_pattern),
+            )
+        )
 
     query = query.order_by(Contact.last_message_at.desc().nullslast())
     query = query.offset(offset).limit(limit)
@@ -1264,48 +1277,47 @@ async def get_contact_topics(contact_id: UUID, user: CurrentUser, db: DB):
 
 @app.post("/api/messages/{contact_id}/download-missing-media")
 async def download_missing_media_endpoint(contact_id: UUID, user: CurrentUser, db: DB):
-    """Find messages with missing media files and re-download from Telegram."""
-    from telegram import download_missing_media as _dl_media
+    """Check for missing media and download in background. Returns immediately."""
     contact = await _get_contact_with_access(contact_id, user, db)
 
-    # Find messages that have media_type (photos, videos, docs, etc.)
+    # Quick check: any media messages that might be missing files?
     result = await db.execute(
-        select(Message).where(
+        select(Message.id, Message.tg_message_id, Message.media_path).where(
             Message.contact_id == contact.id,
             Message.media_type.isnot(None),
             Message.media_type != "sticker",
             Message.tg_message_id.isnot(None),
-        ).order_by(Message.created_at.desc()).limit(200)
+        ).order_by(Message.created_at.desc()).limit(100)
     )
-    all_media_msgs = result.scalars().all()
-    if not all_media_msgs:
-        return {"downloaded": 0, "total": 0}
+    rows = result.all()
+    missing_ids = []
+    for msg_id, tg_msg_id, media_path in rows:
+        if not media_path or not os.path.isfile(os.path.join(MEDIA_DIR, media_path)):
+            missing_ids.append((msg_id, tg_msg_id))
 
-    # Check which files actually exist on disk
-    missing = []
-    for msg in all_media_msgs:
-        if not msg.media_path:
-            missing.append(msg)
-        else:
-            filepath = os.path.join(MEDIA_DIR, msg.media_path)
-            if not os.path.isfile(filepath):
-                missing.append(msg)
-    if not missing:
-        return {"downloaded": 0, "total": 0}
+    if not missing_ids:
+        return {"status": "ok", "missing": 0}
 
-    downloaded = 0
-    for msg in missing[:50]:  # Limit to 50 per request
-        path = await _dl_media(
-            contact.tg_account_id, contact.real_tg_id,
-            msg.tg_message_id, contact.id,
-        )
-        if path:
-            msg.media_path = path
-            downloaded += 1
+    # Download in background — don't block the response
+    async def _bg_download(account_id, chat_tg_id, contact_id, missing):
+        from telegram import download_missing_media as _dl_media
+        from models import async_session as _async_session
+        async with _async_session() as bg_db:
+            downloaded = 0
+            for msg_id, tg_msg_id in missing[:50]:
+                path = await _dl_media(account_id, chat_tg_id, tg_msg_id, contact_id)
+                if path:
+                    result = await bg_db.execute(select(Message).where(Message.id == msg_id))
+                    msg = result.scalar_one_or_none()
+                    if msg:
+                        msg.media_path = path
+                        downloaded += 1
+            if downloaded > 0:
+                await bg_db.commit()
+                print(f"[BG-DOWNLOAD] Downloaded {downloaded} missing media for contact {contact_id}")
 
-    if downloaded > 0:
-        await db.commit()
-    return {"downloaded": downloaded, "total": len(missing)}
+    asyncio.create_task(_bg_download(contact.tg_account_id, contact.real_tg_id, contact.id, missing_ids))
+    return {"status": "downloading", "missing": len(missing_ids)}
 
 
 @app.get("/api/messages/{contact_id}", response_model=list[MessageOut])
