@@ -716,7 +716,7 @@ function TemplatesSection({ canManage }: { canManage: boolean }) {
                   </div>
 
                   {/* Block content */}
-                  {(block.type === "text" || block.type === "photo" || block.type === "video" || block.type === "document") && (
+                  {(block.type === "text" || block.type === "photo" || block.type === "video" || block.type === "document" || block.type === "media_group") && (
                     <textarea value={block.content} onChange={e => updateBlock(idx, { content: e.target.value })}
                       placeholder={block.type === "text" ? "Текст сообщения..." : "Подпись к медиа (необязательно)..."}
                       rows={block.type === "text" ? 3 : 2}
