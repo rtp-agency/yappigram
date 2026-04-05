@@ -1611,7 +1611,12 @@ function ChatsContent() {
                                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                                     <polyline points="14 2 14 8 20 8" />
                                   </svg>
-                                  {m.media_path!.split('/').pop() || 'Download file'}
+                                  {(() => {
+                                    const raw = m.media_path!.split('/').pop() || '';
+                                    // Strip UUID_msgid_ prefix: "abc-def_123_report.pdf" → "report.pdf"
+                                    const cleaned = raw.replace(/^[0-9a-f-]+_\d+_/, '');
+                                    return cleaned || raw || 'Download file';
+                                  })()}
                                 </a>
                               );
                             })()}

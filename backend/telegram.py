@@ -337,7 +337,14 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             media_type, ext = _extract_media(msg_obj)
             media_path = None
             if media_type and ext is not None:
-                filename = f"{contact.id}_{msg_obj.id}{ext}"
+                # Preserve original filename for documents
+                orig_name = getattr(msg_obj.file, 'name', None) if msg_obj.file else None
+                if orig_name and media_type == "document":
+                    # Sanitize: remove path separators, keep safe chars
+                    safe_name = orig_name.replace("/", "_").replace("\\", "_").replace("..", "_")
+                    filename = f"{contact.id}_{msg_obj.id}_{safe_name}"
+                else:
+                    filename = f"{contact.id}_{msg_obj.id}{ext}"
                 filepath = os.path.join(MEDIA_DIR, filename)
                 actual_path = await asyncio.wait_for(msg_obj.download_media(file=filepath), timeout=60)
                 if actual_path:
@@ -593,7 +600,12 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             media_type, ext = _extract_media(msg_obj)
             media_path = None
             if media_type and ext is not None:
-                filename = f"{contact.id}_{msg_obj.id}{ext}"
+                orig_name = getattr(msg_obj.file, 'name', None) if msg_obj.file else None
+                if orig_name and media_type == "document":
+                    safe_name = orig_name.replace("/", "_").replace("\\", "_").replace("..", "_")
+                    filename = f"{contact.id}_{msg_obj.id}_{safe_name}"
+                else:
+                    filename = f"{contact.id}_{msg_obj.id}{ext}"
                 filepath = os.path.join(MEDIA_DIR, filename)
                 actual_path = await asyncio.wait_for(msg_obj.download_media(file=filepath), timeout=60)
                 if actual_path:
@@ -1023,7 +1035,12 @@ async def download_missing_media(account_id: UUID, chat_tg_id: int, tg_msg_id: i
         media_type, ext = _extract_media(msg)
         if not media_type:
             return None
-        filename = f"{contact_id}_{tg_msg_id}{ext or ''}"
+        orig_name = getattr(msg.file, 'name', None) if msg.file else None
+        if orig_name and media_type == "document":
+            safe_name = orig_name.replace("/", "_").replace("\\", "_").replace("..", "_")
+            filename = f"{contact_id}_{tg_msg_id}_{safe_name}"
+        else:
+            filename = f"{contact_id}_{tg_msg_id}{ext or ''}"
         filepath = os.path.join(MEDIA_DIR, filename)
         actual_path = await asyncio.wait_for(msg.download_media(file=filepath), timeout=60)
         if actual_path:
