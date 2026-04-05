@@ -1454,9 +1454,9 @@ function ChatsContent() {
                   const albumCaption = albumMsgs.find((am: any) => am.content)?.content;
                   return (
                     <div key={m.id} className="flex items-start gap-2">
-                      <div className={`max-w-[75%] ${m.direction === "outgoing" ? "ml-auto" : ""}`}>
+                      <div className={`max-w-[320px] ${m.direction === "outgoing" ? "ml-auto" : ""}`}>
                         <div className={`rounded-2xl overflow-hidden ${m.direction === "outgoing" ? "bg-brand" : "bg-surface-card border border-surface-border"}`}>
-                          <div className={`grid ${albumMsgs.length === 1 ? "grid-cols-1" : albumMsgs.length <= 2 ? "grid-cols-2" : "grid-cols-2"} gap-0.5`}>
+                          <div className={`grid ${albumMsgs.length === 1 ? "grid-cols-1" : "grid-cols-2"} gap-0.5`}>
                             {albumMsgs.map((am: any) => (
                               <div key={am.id} className={`overflow-hidden ${albumMsgs.length === 3 && am === albumMsgs[0] ? "col-span-2" : ""}`}>
                                 {am.media_type === "video" ? (
