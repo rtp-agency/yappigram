@@ -500,8 +500,9 @@ function ChatsContent() {
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 200);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 500);
       // Auto-download missing media in background
-      const hasMissing = msgs.some((m: any) => m.media_type && m.media_type !== "sticker" && !m.media_path);
-      if (hasMissing) {
+      // Always check — backend verifies which files actually exist on disk
+      const hasMedia = msgs.some((m: any) => m.media_type && m.media_type !== "sticker");
+      if (hasMedia) {
         api(`/api/messages/${selected.id}/download-missing-media`, { method: "POST" })
           .then((res: any) => {
             if (res?.downloaded > 0) {

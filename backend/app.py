@@ -1249,27 +1249,37 @@ async def get_contact_topics(contact_id: UUID, user: CurrentUser, db: DB):
 
 @app.post("/api/messages/{contact_id}/download-missing-media")
 async def download_missing_media_endpoint(contact_id: UUID, user: CurrentUser, db: DB):
-    """Find messages with media_type but no media_path and download from Telegram."""
+    """Find messages with missing media files and re-download from Telegram."""
     from telegram import download_missing_media as _dl_media
     contact = await _get_contact_with_access(contact_id, user, db)
 
-    # Find messages that have media_type but missing media_path
-    from sqlalchemy import or_
+    # Find messages that have media_type (photos, videos, docs, etc.)
     result = await db.execute(
         select(Message).where(
             Message.contact_id == contact.id,
             Message.media_type.isnot(None),
             Message.media_type != "sticker",
-            or_(Message.media_path.is_(None), Message.media_path == ""),
             Message.tg_message_id.isnot(None),
-        ).order_by(Message.created_at.desc()).limit(50)
+        ).order_by(Message.created_at.desc()).limit(200)
     )
-    missing = result.scalars().all()
+    all_media_msgs = result.scalars().all()
+    if not all_media_msgs:
+        return {"downloaded": 0, "total": 0}
+
+    # Check which files actually exist on disk
+    missing = []
+    for msg in all_media_msgs:
+        if not msg.media_path:
+            missing.append(msg)
+        else:
+            filepath = os.path.join(MEDIA_DIR, msg.media_path)
+            if not os.path.isfile(filepath):
+                missing.append(msg)
     if not missing:
         return {"downloaded": 0, "total": 0}
 
     downloaded = 0
-    for msg in missing:
+    for msg in missing[:50]:  # Limit to 50 per request
         path = await _dl_media(
             contact.tg_account_id, contact.real_tg_id,
             msg.tg_message_id, contact.id,
