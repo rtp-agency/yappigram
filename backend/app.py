@@ -163,6 +163,9 @@ import mimetypes
 async def serve_media(file_path: str):
     """Serve media files with security headers."""
     from fastapi.responses import FileResponse
+    from urllib.parse import unquote
+    # URL-decode path (handles cyrillic and special chars)
+    file_path = unquote(file_path)
     # Prevent path traversal
     safe_path = os.path.join(MEDIA_DIR, file_path)
     safe_path = os.path.abspath(safe_path)
@@ -2274,8 +2277,8 @@ async def template_upload_media(
         try:
             subprocess.run([
                 "ffmpeg", "-y", "-i", filepath,
-                "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-c:a", "aac", "-b:a", "128k",
+                "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=640:640",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-c:a", "aac", "-b:a", "128k",
                 "-f", "mp4", out_path,
             ], check=True, timeout=120, capture_output=True)
             filename = f"template_{template_id}_circle.mp4"
@@ -2352,8 +2355,8 @@ async def template_upload_block_media(
         try:
             subprocess.run([
                 "ffmpeg", "-y", "-i", filepath,
-                "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-c:a", "aac", "-b:a", "128k",
+                "-t", "60", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=640:640",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-c:a", "aac", "-b:a", "128k",
                 "-f", "mp4", out_path,
             ], check=True, timeout=120, capture_output=True)
             filename = f"tplblock_{template_id}_{block_id}_circle.mp4"
@@ -2674,7 +2677,7 @@ async def broadcast_upload_media(
             subprocess.run([
                 "ffmpeg", "-y", "-i", filepath,
                 "-t", "60",
-                "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
+                "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=640:640",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "28",
                 "-an",  # no audio for video notes
                 "-f", "mp4", out_path,

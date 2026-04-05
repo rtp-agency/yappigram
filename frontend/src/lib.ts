@@ -369,7 +369,7 @@ export function isKeyboardHidden(json: string | null): boolean {
 }
 
 export function mediaUrl(media_path: string): string {
-  return `${API}/media/${media_path}`;
+  return `${API}/media/${encodeURIComponent(media_path)}`;
 }
 
 export async function uploadMedia(contactId: string, file: File, caption?: string): Promise<any> {
