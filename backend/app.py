@@ -313,7 +313,7 @@ async def on_startup():
                 -- Pinned chats: org_id for org-wide pins
                 ALTER TABLE pinned_chats ADD COLUMN IF NOT EXISTS org_id VARCHAR;
                 -- TG accounts: show_real_names, display_name
-                ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
+                ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT true;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS disconnected_at TIMESTAMP;
                 ALTER TABLE messages ADD COLUMN IF NOT EXISTS grouped_id BIGINT;

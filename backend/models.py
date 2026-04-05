@@ -62,7 +62,7 @@ class Staff(Base):
     timezone = Column(String, default="UTC")
 
     # Admin setting: show real contact names to operators (default: aliases only)
-    show_real_names = Column(Boolean, default=False)
+    show_real_names = Column(Boolean, default=True)
 
     assigned_contacts = relationship("Contact", back_populates="assigned_operator")
 
@@ -78,7 +78,7 @@ class TgAccount(Base):
     org_id = Column(String, nullable=True, index=True)
 
     display_name = Column(String, nullable=True)
-    show_real_names = Column(Boolean, default=False)
+    show_real_names = Column(Boolean, default=True)
     disconnected_at = Column(DateTime, nullable=True)
 
     contacts = relationship("Contact", back_populates="tg_account")
