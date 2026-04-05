@@ -129,6 +129,7 @@ class MessageOut(BaseModel):
     inline_buttons: str | None = None
     topic_id: int | None = None
     topic_name: str | None = None
+    grouped_id: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -398,6 +398,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 media_type=media_type,
                 media_path=media_path,
                 forwarded_from_alias=forwarded_from_alias,
+                grouped_id=getattr(msg_obj, "grouped_id", None),
             )
             db.add(msg)
             contact.last_message_at = func.now()
@@ -650,6 +651,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 inline_buttons=inline_buttons_json,
                 topic_id=topic_id,
                 topic_name=topic_name,
+                grouped_id=getattr(msg_obj, "grouped_id", None),
             )
             db.add(msg)
             contact.last_message_at = func.now()

@@ -341,6 +341,7 @@ export interface Message {
   inline_buttons: string | null;
   topic_id: number | null;
   topic_name: string | null;
+  grouped_id: number | null;
   created_at: string;
 }
 

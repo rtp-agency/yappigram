@@ -1436,8 +1436,52 @@ function ChatsContent() {
                   <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
                 </div>
               )}
-              {messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted).map((m) => {
+              {(() => {
+                // Group consecutive messages with same grouped_id into albums
+                const filtered = messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted);
+                const albumIds = new Set<number>();
+                filtered.forEach(m => { if ((m as any).grouped_id) albumIds.add((m as any).grouped_id); });
+                const renderedAlbums = new Set<number>();
+                return filtered;
+              })().map((m) => {
                 const buttons = parseInlineButtons(m.inline_buttons);
+                const groupedId = (m as any).grouped_id as number | null;
+                // If part of album, render album grid on first message, skip rest
+                if (groupedId) {
+                  const albumMsgs = messages.filter((am: any) => am.grouped_id === groupedId && am.media_path);
+                  const isFirst = albumMsgs[0]?.id === m.id;
+                  if (!isFirst) return null; // skip non-first album messages
+                  const albumCaption = albumMsgs.find((am: any) => am.content)?.content;
+                  return (
+                    <div key={m.id} className="flex items-start gap-2">
+                      <div className={`max-w-[75%] ${m.direction === "outgoing" ? "ml-auto" : ""}`}>
+                        <div className={`rounded-2xl overflow-hidden ${m.direction === "outgoing" ? "bg-brand" : "bg-surface-card border border-surface-border"}`}>
+                          <div className={`grid ${albumMsgs.length === 1 ? "grid-cols-1" : albumMsgs.length <= 2 ? "grid-cols-2" : "grid-cols-2"} gap-0.5`}>
+                            {albumMsgs.map((am: any) => (
+                              <div key={am.id} className={`overflow-hidden ${albumMsgs.length === 3 && am === albumMsgs[0] ? "col-span-2" : ""}`}>
+                                {am.media_type === "video" ? (
+                                  <video src={mediaUrl(am.media_path)} controls preload="none" className="w-full aspect-square object-cover" />
+                                ) : (
+                                  <img src={mediaUrl(am.media_path)} alt="" loading="lazy" className="w-full aspect-square object-cover cursor-pointer hover:opacity-90"
+                                    onClick={() => setLightboxSrc(mediaUrl(am.media_path))} />
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                          {albumCaption && (
+                            <div className={`px-3 py-1.5 text-sm ${m.direction === "outgoing" ? "text-white" : "text-slate-200"}`}>
+                              <span className="break-words whitespace-pre-wrap">{albumCaption}</span>
+                            </div>
+                          )}
+                          <div className={`px-3 py-1 flex justify-end ${m.direction === "outgoing" ? "text-white/50" : "text-slate-500"}`}>
+                            <span className="text-[10px]">{(m as any).created_at ? new Date((m as any).created_at + (((m as any).created_at || "").endsWith("Z") ? "" : "Z")).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                            {m.direction === "outgoing" && <span className="text-[10px] ml-1">{m.is_read ? "✓✓" : "✓"}</span>}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div key={m.id} className="flex items-start gap-2">
                     {/* Forward checkbox */}

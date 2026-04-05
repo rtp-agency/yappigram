@@ -152,6 +152,9 @@ class Message(Base):
     # Bot inline buttons (JSON string)
     inline_buttons = Column(Text, nullable=True)
 
+    # Media group (album) ID — messages with same grouped_id are shown as album
+    grouped_id = Column(BigInteger, nullable=True, index=True)
+
     created_at = Column(DateTime, default=func.now())
 
     contact = relationship("Contact", back_populates="messages")

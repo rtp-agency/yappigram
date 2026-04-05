@@ -316,6 +316,8 @@ async def on_startup():
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS show_real_names BOOLEAN DEFAULT false;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS display_name VARCHAR;
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS disconnected_at TIMESTAMP;
+                ALTER TABLE messages ADD COLUMN IF NOT EXISTS grouped_id BIGINT;
+                CREATE INDEX IF NOT EXISTS ix_messages_grouped_id ON messages (grouped_id) WHERE grouped_id IS NOT NULL;
                 -- Scheduled messages
                 CREATE TABLE IF NOT EXISTS scheduled_messages (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
