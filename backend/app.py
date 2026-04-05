@@ -1770,7 +1770,9 @@ async def send_template_single_block(
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
                 raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
-        # Save each media as a separate message
+        # Save each media as a separate message with same grouped_id
+        import random
+        album_grouped_id = random.randint(10**15, 10**18)
         msgs = []
         for i, tg_id in enumerate(tg_msg_ids or []):
             mf = media_files[i] if i < len(media_files) else {}
@@ -1779,6 +1781,7 @@ async def send_template_single_block(
                 content=text if i == 0 else None,
                 media_type=mf.get("type", "photo"),
                 media_path=mf.get("path"), sent_by=user.id,
+                grouped_id=album_grouped_id,
             )
             db.add(msg)
             msgs.append(msg)
