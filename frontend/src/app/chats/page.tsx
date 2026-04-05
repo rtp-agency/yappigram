@@ -997,16 +997,6 @@ function ChatsContent() {
           {/* Account switcher */}
           {accountsList.length > 1 && (
             <div className="flex gap-1 px-4 pt-2 pb-1 overflow-x-auto flex-nowrap">
-              <button
-                onClick={() => switchAccount(null)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
-                  !filterAccountId
-                    ? "bg-brand/15 text-brand border border-brand/30"
-                    : "text-slate-400 hover:text-slate-300 border border-transparent"
-                }`}
-              >
-                Все
-              </button>
               {accountsList.map((acc) => (
                 <button
                   key={acc.id}
