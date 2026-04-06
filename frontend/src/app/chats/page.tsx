@@ -1858,7 +1858,7 @@ function ChatsContent() {
               const acctFiltered = templates.filter((tpl) => {
                 if (filterAccountId && tpl.tg_account_id && tpl.tg_account_id !== filterAccountId) return false;
                 if (!textRef.current.startsWith("/")) return true;
-                const q = text.toLowerCase();
+                const q = textRef.current.toLowerCase();
                 return (tpl.shortcut && tpl.shortcut.toLowerCase().startsWith(q)) || tpl.title.toLowerCase().includes(q.slice(1));
               });
               const categories = [...new Set(acctFiltered.map((t) => t.category).filter(Boolean))] as string[];
