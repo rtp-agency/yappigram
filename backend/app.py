@@ -967,7 +967,7 @@ async def list_contacts(
     import json as _json
     cache_key = None
     if not search and not tag and not assigned_to and not status_filter and offset == 0:
-        cache_key = f"contacts:{_org_id(user)}:{tg_account_id or 'all'}:{archived}:{user.role}:{limit}"
+        cache_key = f"contacts:{_org_id(user)}:{user.id}:{tg_account_id or 'all'}:{archived}:{limit}"
         cached = await cache_get(cache_key)
         if cached:
             return _json.loads(cached)
