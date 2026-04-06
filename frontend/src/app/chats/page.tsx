@@ -191,13 +191,15 @@ function ChatsContent() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [selected, setSelected] = useState<Contact | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [text, _setText_unused] = useState(""); // kept for compat, not used for rendering
+  const [hasText, setHasText] = useState(false); // lightweight: only tracks empty vs non-empty
   const textRef = useRef("");
-  // Helper: set text in both ref and DOM input (no React re-render)
+  // Helper: set text in both ref and DOM input (no React re-render on every keystroke)
   const setText = (val: string | ((prev: string) => string)) => {
     const newVal = typeof val === "function" ? val(textRef.current) : val;
     textRef.current = newVal;
     if (inputRef.current) inputRef.current.value = newVal;
+    const hasContent = newVal.replace(/[\s\d]/g, "").length > 0;
+    if (hasContent !== hasText) setHasText(hasContent);
   };
   const [search, setSearch] = useState("");
   const [editingAlias, setEditingAlias] = useState(false);
@@ -1063,7 +1065,7 @@ function ChatsContent() {
           </div>
         </div>
         <div className="flex-1 overflow-auto">
-          {filteredContacts.map((c) => (
+          {filteredContacts.slice(0, search ? 500 : 100).map((c) => (
             <div
               key={c.id}
               onClick={() => { setSelected(c); setShowTags(false); setEditingAlias(false); }}
@@ -1164,6 +1166,14 @@ function ChatsContent() {
               )}
             </div>
           ))}
+          {filteredContacts.length > (search ? 500 : 100) && (
+            <button
+              onClick={() => { /* scroll triggers more loading via intersection observer in future */ }}
+              className="w-full py-2 text-xs text-slate-500 text-center"
+            >
+              Показано {search ? 500 : 100} из {filteredContacts.length} чатов. Используйте поиск для остальных.
+            </button>
+          )}
           {filteredContacts.length === 0 && (
             <div className="flex flex-col items-center justify-center mt-16 text-slate-500">
               <svg className="w-12 h-12 mb-3 text-slate-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">
@@ -2023,7 +2033,7 @@ function ChatsContent() {
                 />
                 <div className="relative shrink-0">
                   {/* Translate button — floats above attach when typing real text */}
-                  {(() => { const s = text.replace(/[\s\d]/g, ""); return s.length > 0; })() && (
+                  {hasText && (
                     <button
                       onClick={async (e) => {
                         e.stopPropagation();
@@ -2124,6 +2134,8 @@ function ChatsContent() {
                   onChange={(e) => {
                     textRef.current = e.target.value;
                     const val = e.target.value;
+                    const has = val.replace(/[\s\d]/g, "").length > 0;
+                    if (has !== hasText) setHasText(has);
                     const shouldShow = val.startsWith("/") && val.length >= 1;
                     if (shouldShow && !showTemplates) {
                       setShowTemplates(true);
