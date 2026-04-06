@@ -6,7 +6,19 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
+import functools
+
+
+def _safe_handler(func):
+    """Wrap Telethon event handler in try-except to prevent crashes."""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            print(f"[HANDLER-ERROR] {func.__name__}: {type(e).__name__}: {e}", flush=True)
+    return wrapper
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest, GetAllDraftsRequest
 
@@ -44,6 +56,7 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # Active Telethon clients: tg_account_id -> TelegramClient
 _clients: dict[UUID, TelegramClient] = {}
+_reconnect_locks: dict[UUID, asyncio.Lock] = {}  # per-account reconnect lock
 
 # Per-account error tracking for circuit breaker
 _account_errors: dict[UUID, int] = {}  # consecutive error count
@@ -65,16 +78,19 @@ def _cleanup_pending_auth():
 _USERNAME_RE = re.compile(r"@[A-Za-z0-9_]{4,}")
 
 # Topic name cache: (account_id, peer_id, topic_id) -> topic_name
-_topic_cache: dict[tuple, str] = {}
+_topic_cache: dict[tuple, tuple[str, float]] = {}  # key -> (name, timestamp)
+_TOPIC_CACHE_TTL = 3600  # 1 hour
 
 
 async def _resolve_topic_name(client: TelegramClient, peer_id: int, topic_id: int, account_id: UUID) -> str | None:
     """Resolve topic name for a forum supergroup, with caching."""
     if topic_id == 1:
         return "General"
+    import time as _time
     cache_key = (account_id, peer_id, topic_id)
-    if cache_key in _topic_cache:
-        return _topic_cache[cache_key]
+    cached = _topic_cache.get(cache_key)
+    if cached and _time.time() - cached[1] < _TOPIC_CACHE_TTL:
+        return cached[0]
     try:
         # The topic creation message (service message) has the topic title
         # Topic ID = message ID of the service message that created the topic
@@ -83,7 +99,7 @@ async def _resolve_topic_name(client: TelegramClient, peer_id: int, topic_id: in
         result = await client(GetForumTopicsByIDRequest(channel=entity, topics=[topic_id]))
         if result.topics:
             name = result.topics[0].title
-            _topic_cache[cache_key] = name
+            _topic_cache[cache_key] = (name, _time.time())
             return name
     except ImportError:
         pass
@@ -94,7 +110,7 @@ async def _resolve_topic_name(client: TelegramClient, peer_id: int, topic_id: in
         msgs = await client.get_messages(peer_id, ids=topic_id)
         if msgs and hasattr(msgs, "action") and hasattr(msgs.action, "title"):
             name = msgs.action.title
-            _topic_cache[cache_key] = name
+            _topic_cache[cache_key] = (name, _time.time())
             return name
     except Exception:
         pass
@@ -304,6 +320,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
     _clients[account.id] = client
 
     @client.on(events.NewMessage(outgoing=True))
+    @_safe_handler
     async def on_outgoing_message(event):
         """Capture messages sent directly from Telegram (not through CRM)."""
         msg_obj = event.message
@@ -428,6 +445,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             }, org_id=account.org_id)
 
     @client.on(events.NewMessage(incoming=True))
+    @_safe_handler
     async def on_new_message(event):
       try:
         msg_obj = event.message
@@ -743,6 +761,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
         _account_status[account.id] = "connected"
 
     @client.on(events.MessageEdited)
+    @_safe_handler
     async def on_message_edited(event):
         msg_obj = event.message
         async with async_session() as db:
@@ -790,6 +809,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             }, org_id=account.org_id)
 
     @client.on(events.MessageRead(inbox=False))
+    @_safe_handler
     async def on_message_read(event):
         """Track when the other party reads our outgoing messages."""
         max_id = event.max_id
@@ -833,6 +853,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             }, org_id=account.org_id)
 
     @client.on(events.MessageDeleted)
+    @_safe_handler
     async def on_message_deleted(event):
         deleted_ids = event.deleted_ids
         if not deleted_ids:
@@ -894,6 +915,19 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
 async def _try_reconnect(account_id: UUID) -> TelegramClient | None:
     """Try to reconnect a disconnected account and return the client."""
+    # Prevent duplicate reconnect attempts
+    if account_id not in _reconnect_locks:
+        _reconnect_locks[account_id] = asyncio.Lock()
+    if _reconnect_locks[account_id].locked():
+        return _clients.get(account_id)
+    await _reconnect_locks[account_id].acquire()
+    try:
+      return await _try_reconnect_inner(account_id)
+    finally:
+      _reconnect_locks[account_id].release()
+
+
+async def _try_reconnect_inner(account_id: UUID) -> TelegramClient | None:
     async with async_session() as db:
         result = await db.execute(
             select(TgAccount).where(TgAccount.id == account_id, TgAccount.is_active.is_(True))
@@ -944,17 +978,27 @@ async def send_message(
     kwargs = {}
     if reply_to_tg_msg_id:
         kwargs["reply_to"] = reply_to_tg_msg_id
-    if file_path:
-        if media_type == "voice":
-            kwargs["voice_note"] = True
-            result = await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
-        elif media_type == "video_note":
-            kwargs["video_note"] = True
-            result = await client.send_file(tg_id, file_path, **kwargs)  # video notes have no caption
+
+    async def _do_send():
+        if file_path:
+            if media_type == "voice":
+                kwargs["voice_note"] = True
+                return await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
+            elif media_type == "video_note":
+                kwargs["video_note"] = True
+                return await client.send_file(tg_id, file_path, **kwargs)
+            else:
+                return await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
         else:
-            result = await client.send_file(tg_id, file_path, caption=text or "", **kwargs)
-    else:
-        result = await client.send_message(tg_id, text, **kwargs)
+            return await client.send_message(tg_id, text, **kwargs)
+
+    try:
+        result = await _do_send()
+    except FloodWaitError as e:
+        wait = min(e.seconds, 60)  # cap wait at 60s
+        print(f"[FLOOD] Rate limited, waiting {wait}s before retry", flush=True)
+        await asyncio.sleep(wait)
+        result = await _do_send()
     return result.id
 
 

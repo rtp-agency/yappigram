@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import secrets
 import time
 import uuid as uuid_mod
@@ -26,6 +27,13 @@ BLOCKED_EXTENSIONS = {
 }
 
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+def _validate_block_id(block_id: str) -> str:
+    """Validate block_id to prevent path traversal."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", block_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid block_id")
+    return block_id
 
 
 def _validate_upload(file: "UploadFile") -> None:
@@ -930,23 +938,41 @@ async def get_drafts_endpoint(user: CurrentUser, db: DB, tg_account_id: UUID | N
     if tg_account_id and tg_account_id in account_ids:
         account_ids = [tg_account_id]
 
-    all_drafts = []
+    # Collect all drafts from all accounts
+    raw_drafts = []
     for aid in account_ids:
         drafts = await get_drafts(aid)
         for d in drafts:
-            # Match peer_id to CRM contact
-            contact_result = await db.execute(
-                select(Contact.id, Contact.alias).where(
-                    Contact.tg_account_id == aid,
-                    Contact.real_tg_id == d["peer_id"],
-                )
-            )
-            row = contact_result.first()
-            if row:
-                d["contact_id"] = str(row[0])
-                d["contact_alias"] = row[1]
-                d["tg_account_id"] = str(aid)
-                all_drafts.append(d)
+            d["_account_id"] = aid
+            raw_drafts.append(d)
+
+    if not raw_drafts:
+        return []
+
+    # Batch lookup: match all peer_ids to contacts in one query
+    peer_ids = [d["peer_id"] for d in raw_drafts]
+    contact_result = await db.execute(
+        select(Contact.id, Contact.alias, Contact.real_tg_id, Contact.tg_account_id).where(
+            Contact.real_tg_id.in_(peer_ids),
+            Contact.tg_account_id.in_(account_ids),
+        )
+    )
+    # Build lookup: (account_id, peer_id) -> (contact_id, alias)
+    contact_map = {}
+    for row in contact_result.all():
+        contact_map[(row[3], row[2])] = (str(row[0]), row[1])
+
+    all_drafts = []
+    for d in raw_drafts:
+        key = (d["_account_id"], d["peer_id"])
+        match = contact_map.get(key)
+        if match:
+            d["contact_id"] = match[0]
+            d["contact_alias"] = match[1]
+            d["tg_account_id"] = str(d.pop("_account_id"))
+            all_drafts.append(d)
+        else:
+            d.pop("_account_id", None)
     return all_drafts
 
 
@@ -2321,13 +2347,12 @@ async def delete_tag(tag_id: UUID, user: ContentManager, db: DB):
     tag = result.scalar_one_or_none()
     if not tag:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
-    # Remove tag from contacts that have it
+    # Remove tag from all contacts in one SQL statement
     tag_name = tag.name
-    contacts_result = await db.execute(
-        select(Contact).where(Contact.tags.any(tag_name))
-    )
-    for contact in contacts_result.scalars().all():
-        contact.tags = [t for t in contact.tags if t != tag_name]
+    from sqlalchemy import text as _text
+    await db.execute(_text(
+        "UPDATE contacts SET tags = array_remove(tags, :tag_name) WHERE tags @> ARRAY[:tag_name]"
+    ), {"tag_name": tag_name})
     await db.delete(tag)
     await db.commit()
     return {"status": "deleted"}
@@ -2506,6 +2531,7 @@ async def template_upload_block_media(
     send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
 ):
     """Upload media for a specific block within a template."""
+    _validate_block_id(block_id)
     _validate_upload(file)
 
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
@@ -2574,6 +2600,7 @@ async def template_upload_block_media(
 @app.delete("/api/templates/{template_id}/block-media/{block_id}")
 async def template_delete_block_media(template_id: UUID, block_id: str, user: ContentManager, db: DB):
     """Delete media file for a specific block."""
+    _validate_block_id(block_id)
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
     tpl = result.scalar_one_or_none()
     if not tpl:
@@ -2905,7 +2932,9 @@ async def broadcast_upload_media(
 
 @app.post("/api/broadcasts/{broadcast_id}/start")
 async def start_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
-    result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
+    result = await db.execute(
+        select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)).with_for_update()
+    )
     bc = result.scalar_one_or_none()
     if not bc:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
