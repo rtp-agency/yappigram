@@ -958,6 +958,15 @@ async def list_contacts(
     limit: int = Query(2000, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ):
+    # Redis cache for common queries (no search, no tag, no assigned_to filter)
+    import json as _json
+    cache_key = None
+    if not search and not tag and not assigned_to and not status_filter and offset == 0:
+        cache_key = f"contacts:{_org_id(user)}:{tg_account_id or 'all'}:{archived}:{user.role}:{limit}"
+        cached = await cache_get(cache_key)
+        if cached:
+            return _json.loads(cached)
+
     query = select(Contact)
 
     # Org scoping: only contacts from this org's TG accounts
@@ -1053,6 +1062,16 @@ async def list_contacts(
             c.last_message_content = None
             c.last_message_direction = None
             c.last_message_is_read = None
+
+    # Cache result for 15s
+    if cache_key:
+        try:
+            from pydantic import TypeAdapter
+            ta = TypeAdapter(list[ContactOut])
+            serialized = ta.dump_json(contacts).decode()
+            await cache_set(cache_key, serialized, ttl=15)
+        except Exception:
+            pass
 
     return contacts
 
@@ -2576,6 +2595,7 @@ async def archive_contact(contact_id: UUID, user: CurrentUser, db: DB):
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     contact.is_archived = True
     await db.commit()
+    await cache_invalidate(f"contacts:{_org_id(user)}:*")
     return {"status": "archived"}
 
 
@@ -2587,6 +2607,7 @@ async def unarchive_contact(contact_id: UUID, user: CurrentUser, db: DB):
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     contact.is_archived = False
     await db.commit()
+    await cache_invalidate(f"contacts:{_org_id(user)}:*")
     return {"status": "unarchived"}
 
 
