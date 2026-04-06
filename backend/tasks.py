@@ -128,6 +128,20 @@ async def telethon_health_monitor():
                                 print(f"[HEALTH] {account.phone} reconnect failed")
                         except Exception as e:
                             print(f"[HEALTH] {account.phone} reconnect error: {e}")
+            # Periodically save StringSessions to DB (auth keys may update)
+            for account_id, client in list(_clients.items()):
+                if client.is_connected() and hasattr(client.session, 'save'):
+                    try:
+                        ss = client.session.save()
+                        if ss:
+                            async with async_session() as db:
+                                result = await db.execute(select(TgAccount).where(TgAccount.id == account_id))
+                                acc = result.scalar_one_or_none()
+                                if acc and acc.session_string != ss:
+                                    acc.session_string = ss
+                                    await db.commit()
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[HEALTH] Monitor error: {e}")
         await asyncio.sleep(60)

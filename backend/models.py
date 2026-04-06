@@ -77,6 +77,7 @@ class TgAccount(Base):
     connected_at = Column(DateTime, default=func.now())
     org_id = Column(String, nullable=True, index=True)
 
+    session_string = Column(Text, nullable=True)  # Telethon StringSession (replaces SQLite file)
     display_name = Column(String, nullable=True)
     show_real_names = Column(Boolean, default=True)
     disconnected_at = Column(DateTime, nullable=True)

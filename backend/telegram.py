@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
+from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 
 from config import settings
@@ -126,11 +127,18 @@ async def start_connect(phone: str) -> dict:
     import logging
     log = logging.getLogger("tg_connect")
     log.info(f"start_connect called for phone={phone}")
-    session_file = _session_path(phone)
+    # Try to load existing session_string from DB
+    session = StringSession()
+    async with async_session() as db:
+        result = await db.execute(select(TgAccount).where(TgAccount.phone == phone))
+        existing = result.scalar_one_or_none()
+        if existing and existing.session_string:
+            session = StringSession(existing.session_string)
+            print(f"[TG_CONNECT] Loaded StringSession from DB for {phone}", flush=True)
 
     for attempt in range(2):
         client = TelegramClient(
-            session_file,
+            session,
             settings.TG_API_ID,
             settings.TG_API_HASH,
         )
@@ -139,7 +147,6 @@ async def start_connect(phone: str) -> dict:
         try:
             result = await client.send_code_request(phone, force_sms=True)
             print(f"[TG_CONNECT] send_code OK: type={type(result.type).__name__}, hash={result.phone_code_hash[:8]}...", flush=True)
-            # Disconnect previous pending client for same phone
             import time
             if phone in _pending_auth:
                 old_client, _ = _pending_auth.pop(phone)
@@ -151,14 +158,8 @@ async def start_connect(phone: str) -> dict:
             print(f"[TG_CONNECT] Connection error (attempt {attempt+1}): {e}", flush=True)
             await client.disconnect()
             if attempt == 0:
-                # Delete stale session and retry with fresh one
-                import glob
-                for f in glob.glob(session_file + "*"):
-                    try:
-                        os.remove(f)
-                        print(f"[TG_CONNECT] Removed stale session: {f}", flush=True)
-                    except Exception:
-                        pass
+                # Retry with fresh session
+                session = StringSession()
                 continue
             raise
         except Exception as e:
@@ -189,18 +190,21 @@ async def verify_code(phone: str, code: str, password_2fa: str | None = None) ->
         parts = [getattr(me, "first_name", "") or "", getattr(me, "last_name", "") or ""]
         display_name = " ".join(p for p in parts if p).strip() or getattr(me, "username", None) or None
 
-    # Save to DB (upsert — reactivate if already exists)
+    # Save StringSession to DB (no more SQLite files)
+    session_str = client.session.save()
     async with async_session() as db:
         result = await db.execute(select(TgAccount).where(TgAccount.phone == phone))
         account = result.scalar_one_or_none()
         if account:
-            account.session_file = _session_path(phone)
+            account.session_file = _session_path(phone)  # keep for compat
+            account.session_string = session_str
             account.is_active = True
             account.display_name = display_name
         else:
             account = TgAccount(
                 phone=phone,
                 session_file=_session_path(phone),
+                session_string=session_str,
                 is_active=True,
                 display_name=display_name,
             )
@@ -896,8 +900,9 @@ async def _try_reconnect(account_id: UUID) -> TelegramClient | None:
     if not account:
         return None
     try:
+        session = StringSession(account.session_string) if account.session_string else account.session_file
         client = TelegramClient(
-            account.session_file,
+            session,
             settings.TG_API_ID,
             settings.TG_API_HASH,
         )
@@ -1087,9 +1092,15 @@ async def startup_listeners() -> None:
     print(f"[STARTUP] Found {len(accounts)} active TG accounts")
     for account in accounts:
         try:
-            print(f"[STARTUP] Connecting {account.phone} (session: {account.session_file})")
+            # Prefer StringSession from DB (no SQLite lock), fallback to file
+            if account.session_string:
+                session = StringSession(account.session_string)
+                print(f"[STARTUP] Connecting {account.phone} (StringSession from DB)")
+            else:
+                session = account.session_file
+                print(f"[STARTUP] Connecting {account.phone} (SQLite file: {account.session_file})")
             client = TelegramClient(
-                account.session_file,
+                session,
                 settings.TG_API_ID,
                 settings.TG_API_HASH,
             )
@@ -1097,6 +1108,20 @@ async def startup_listeners() -> None:
             authorized = await client.is_user_authorized()
             print(f"[STARTUP] {account.phone} authorized={authorized}")
             if authorized:
+                # Auto-migrate: save StringSession to DB if connected via file
+                if not account.session_string:
+                    try:
+                        ss = client.session.save()
+                        async with async_session() as db_mig:
+                            res_mig = await db_mig.execute(select(TgAccount).where(TgAccount.id == account.id))
+                            acc_mig = res_mig.scalar_one_or_none()
+                            if acc_mig:
+                                acc_mig.session_string = ss
+                                await db_mig.commit()
+                                print(f"[STARTUP] Migrated {account.phone} session to StringSession in DB")
+                    except Exception as e_mig:
+                        print(f"[STARTUP] Could not migrate session for {account.phone}: {e_mig}")
+
                 # Backfill display_name if missing
                 if not account.display_name:
                     try:
