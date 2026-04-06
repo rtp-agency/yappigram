@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { api, clearTokens, disconnectWS, getTokens, isTelegramWebApp, getTgWebApp } from "./lib";
 
 // ============================================================
@@ -139,13 +139,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => {});
   }, []);
 
-  const navItems = [
+  const navItems = useMemo(() => [
     { href: "/chats", label: "Чаты", icon: IconChat },
     { href: "/broadcasts", label: "Рассылки", icon: IconSend },
     ...(isOrgTeam && userRole !== "operator" ? [{ href: "/team", label: "Команда", icon: IconTeam }] : []),
     { href: "/stats", label: "Статистика", icon: IconStats },
     { href: "/settings", label: "Настройки", icon: IconSettings },
-  ];
+  ], [isOrgTeam, userRole]);
 
 
   useEffect(() => {

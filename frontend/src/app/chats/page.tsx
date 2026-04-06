@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, memo, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback, memo, useMemo, startTransition } from "react";
 import {
   api,
   archiveContact,
@@ -34,8 +34,22 @@ import {
 } from "@/lib";
 import { AppShell, AuthGuard, Badge, Button } from "@/components";
 
+// --- Helpers hoisted outside component to avoid re-creation ---
+const IMAGE_EXTS = new Set(['jpg','jpeg','png','gif','webp','bmp','svg']);
+
+function isImageFile(path: string): boolean {
+  const fname = path.split('/').pop() || '';
+  const ext = fname.includes('.') ? fname.split('.').pop()?.toLowerCase() || '' : '';
+  return IMAGE_EXTS.has(ext) || fname.startsWith('photo_');
+}
+
+function cleanFileName(path: string): string {
+  const raw = path.split('/').pop() || '';
+  return raw.replace(/^[0-9a-f-]+_\d+_/, '') || raw || 'Download file';
+}
+
 // Lazy avatar: shows initials immediately, loads real avatar when visible in viewport
-function LazyAvatar({ contactId, alias, chatType, hasError, onError }: {
+const LazyAvatar = memo(function LazyAvatar({ contactId, alias, chatType, hasError, onError }: {
   contactId: string; alias: string; chatType: string; hasError: boolean; onError: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -78,10 +92,10 @@ function LazyAvatar({ contactId, alias, chatType, hasError, onError }: {
       </div>
     </div>
   );
-}
+});
 
 // Custom voice message player with waveform visualization
-function VoicePlayer({ src, direction }: { src: string; direction: string }) {
+const VoicePlayer = memo(function VoicePlayer({ src, direction }: { src: string; direction: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -169,7 +183,7 @@ function VoicePlayer({ src, direction }: { src: string; direction: string }) {
       </div>
     </div>
   );
-}
+});
 
 // Sort messages by time, fallback to tg_message_id
 const sortMsgs = (msgs: Message[]) => [...msgs].sort((a, b) => {
@@ -186,6 +200,37 @@ export default function ChatsPage() {
       </AppShell>
     </AuthGuard>
   );
+}
+
+// Cached date formatter — avoids creating new Date + toLocale on every render
+const _dateCache = new Map<string, string>();
+function formatTime(dateStr: string | null, tz?: string): string {
+  if (!dateStr) return "";
+  const key = `t:${dateStr}:${tz}`;
+  let cached = _dateCache.get(key);
+  if (!cached) {
+    const d = new Date(dateStr + ((dateStr || "").endsWith("Z") ? "" : "Z"));
+    cached = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: tz });
+    _dateCache.set(key, cached);
+    if (_dateCache.size > 2000) _dateCache.clear(); // prevent unbounded growth
+  }
+  return cached;
+}
+function formatDateShort(dateStr: string | null, tz?: string): string {
+  if (!dateStr) return "";
+  const key = `d:${dateStr}:${tz}`;
+  let cached = _dateCache.get(key);
+  if (!cached) {
+    const d = new Date(dateStr + ((dateStr || "").endsWith("Z") ? "" : "Z"));
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    cached = isToday
+      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: tz })
+      : d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", timeZone: tz });
+    _dateCache.set(key, cached);
+    if (_dateCache.size > 2000) _dateCache.clear();
+  }
+  return cached;
 }
 
 function ChatsContent() {
@@ -328,6 +373,15 @@ function ChatsContent() {
   // Pending media files (attach before sending)
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
 
+  // Create stable blob URLs for pending files and revoke on change
+  const pendingFileUrls = useMemo(() => {
+    const urls = pendingFiles.map(f => f.type.startsWith("image/") ? URL.createObjectURL(f) : null);
+    return urls;
+  }, [pendingFiles]);
+  useEffect(() => {
+    return () => { pendingFileUrls.forEach(url => url && URL.revokeObjectURL(url)); };
+  }, [pendingFileUrls]);
+
   // Input dropdown menu (emoji/translate/schedule)
   const [showInputMenu, setShowInputMenu] = useState(false);
 
@@ -429,6 +483,8 @@ function ChatsContent() {
     connectWS();
 
     const unsub = onWSEvent((event) => {
+      // Batch WS state updates to avoid multiple re-renders per event
+      startTransition(() => {
       if (event.type === "new_message") {
         const isCurrentChat = selectedRef.current?.id === event.contact_id;
         setContacts((prev) => {
@@ -496,6 +552,7 @@ function ChatsContent() {
       if (event.type === "contact_deleted") {
         setContacts((prev) => prev.filter((c) => c.id !== event.contact_id));
       }
+      }); // end startTransition
     });
 
     return unsub;
@@ -577,8 +634,7 @@ function ChatsContent() {
     const topicParam = activeTopic !== null ? `&topic_id=${activeTopic}` : "";
     api(`/api/messages/${selected.id}?limit=200${topicParam}`).then((msgs: Message[]) => {
       setMessages(sortMsgs(msgs));
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 50);
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 300);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 100);
     }).catch(console.error).finally(() => setLoadingTopic(false));
   }, [activeTopic]);
 
@@ -1031,6 +1087,25 @@ function ChatsContent() {
     return map;
   }, [messages]);
 
+  // Pre-compute tag lookup map (O(1) instead of O(n) per tag)
+  const tagMap = useMemo(() => new Map(allTags.map(t => [t.name, t])), [allTags]);
+
+  // Pre-compute media categories for user info panel (single pass instead of 5 filters)
+  const mediaByType = useMemo(() => {
+    const result = { photos: [] as Message[], videos: [] as Message[], files: [] as Message[], voices: [] as Message[] };
+    messages.forEach(m => {
+      if (!m.media_path || !m.media_type || m.media_type === "sticker") return;
+      if (m.media_type === "photo") { result.photos.push(m); return; }
+      if (m.media_type === "voice") { result.voices.push(m); return; }
+      if (m.media_type === "video" && !(m.media_path || "").endsWith(".webm")) { result.videos.push(m); return; }
+      if (m.media_type === "document") {
+        if (isImageFile(m.media_path)) result.photos.push(m);
+        else result.files.push(m);
+      }
+    });
+    return result;
+  }, [messages]);
+
   const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel" || selected?.chat_type === "supergroup";
 
   return (
@@ -1188,16 +1263,7 @@ function ChatsContent() {
                 <div className="flex flex-col items-end gap-1 shrink-0">
                   {c.last_message_at && (
                     <span className={`text-xs ${unread.has(c.id) ? "text-brand font-medium" : "text-slate-500"}`}>
-                      {(() => {
-                        const d = new Date(c.last_message_at + ((c.last_message_at || "").endsWith("Z") ? "" : "Z"));
-                        const now = new Date();
-                        const tzNow = new Date(now.toLocaleString("en-US", { timeZone: userTimezone }));
-                        const tzD = new Date(d.toLocaleString("en-US", { timeZone: userTimezone }));
-                        const isToday = tzD.toDateString() === tzNow.toDateString();
-                        return isToday
-                          ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: userTimezone })
-                          : d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", timeZone: userTimezone });
-                      })()}
+                      {formatDateShort(c.last_message_at, userTimezone)}
                     </span>
                   )}
                   <div className="flex items-center gap-1">
@@ -1236,7 +1302,7 @@ function ChatsContent() {
               {c.tags.length > 0 && (
                 <div className="flex gap-1 mt-1.5">
                   {c.tags.map((t) => {
-                    const tagInfo = allTags.find((at) => at.name === t);
+                    const tagInfo = tagMap.get(t);
                     return <Badge key={t} text={t} color={tagInfo?.color} />;
                   })}
                 </div>
@@ -1406,7 +1472,7 @@ function ChatsContent() {
               <div className="px-3 py-1.5 border-b border-surface-border/50 bg-surface/50 shrink-0">
                 <div className="flex gap-1 items-center flex-wrap">
                   {selected.tags.map((t) => {
-                    const tagInfo = allTags.find((at) => at.name === t);
+                    const tagInfo = tagMap.get(t);
                     return <Badge key={t} text={t} color={tagInfo?.color} />;
                   })}
                   {selected.tags.length === 0 && !showTags && (
@@ -1516,7 +1582,8 @@ function ChatsContent() {
               className="flex-1 overflow-auto overflow-x-hidden p-4 space-y-2 relative"
               onScroll={(e) => {
                 const el = e.currentTarget;
-                setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 300);
+                const s = el.scrollHeight - el.scrollTop - el.clientHeight > 300;
+                setShowScrollBtn((p) => p === s ? p : s);
               }}
             >
               {(loadingMessages || loadingTopic) && (
@@ -1555,7 +1622,7 @@ function ChatsContent() {
                             </div>
                           )}
                           <div className={`px-3 py-1 flex justify-end ${m.direction === "outgoing" ? "text-white/50" : "text-slate-500"}`}>
-                            <span className="text-[10px]">{(m as any).created_at ? new Date((m as any).created_at + (((m as any).created_at || "").endsWith("Z") ? "" : "Z")).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                            <span className="text-[10px]">{formatTime((m as any).created_at)}</span>
                             {m.direction === "outgoing" && <span className="text-[10px] ml-1">{m.is_read ? "✓✓" : "✓"}</span>}
                           </div>
                         </div>
@@ -1711,8 +1778,7 @@ function ChatsContent() {
                             {m.media_type === "document" && (() => {
                               const fname = m.media_path!.split('/').pop() || '';
                               const ext = fname.includes('.') ? fname.split('.').pop()?.toLowerCase() || '' : '';
-                              const imageExts = ['jpg','jpeg','png','gif','webp','bmp','svg'];
-                              const isImage = imageExts.includes(ext) || fname.startsWith('photo_');
+                              const isImage = isImageFile(m.media_path!);
                               return isImage ? (
                                 <img
                                   src={mediaUrl(m.media_path!)}
@@ -1737,12 +1803,7 @@ function ChatsContent() {
                                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                                     <polyline points="14 2 14 8 20 8" />
                                   </svg>
-                                  {(() => {
-                                    const raw = m.media_path!.split('/').pop() || '';
-                                    // Strip UUID_msgid_ prefix: "abc-def_123_report.pdf" → "report.pdf"
-                                    const cleaned = raw.replace(/^[0-9a-f-]+_\d+_/, '');
-                                    return cleaned || raw || 'Download file';
-                                  })()}
+                                  {cleanFileName(m.media_path!)}
                                 </a>
                               );
                             })()}
@@ -1792,7 +1853,7 @@ function ChatsContent() {
                               (ред.)
                             </button>
                           )}
-                          {new Date(m.created_at + ((m.created_at || "").endsWith("Z") ? "" : "Z")).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: userTimezone })}
+                          {formatTime(m.created_at, userTimezone)}
                           {m.direction === "outgoing" && (
                             <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                               {m.is_read ? (
@@ -2054,8 +2115,8 @@ function ChatsContent() {
                 <div className="flex items-center gap-2 overflow-x-auto">
                   {pendingFiles.map((file, idx) => (
                     <div key={idx} className="relative shrink-0 group">
-                      {file.type.startsWith("image/") ? (
-                        <img src={URL.createObjectURL(file)} alt="" className="w-16 h-16 rounded-lg object-cover border border-surface-border" />
+                      {file.type.startsWith("image/") && pendingFileUrls[idx] ? (
+                        <img src={pendingFileUrls[idx]!} alt="" className="w-16 h-16 rounded-lg object-cover border border-surface-border" />
                       ) : file.type.startsWith("video/") ? (
                         <div className="w-16 h-16 rounded-lg border border-surface-border bg-surface-card flex items-center justify-center">
                           <svg className="w-6 h-6 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
@@ -2226,16 +2287,14 @@ function ChatsContent() {
                     document.body.classList.add("tg-input-focused");
                     const nav = document.getElementById("bottom-nav");
                     if (nav) nav.style.display = "none";
-                    for (const delay of [50, 150, 300, 500]) {
-                      setTimeout(() => {
-                        messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-                        if (window.visualViewport) {
-                          document.documentElement.style.height = `${window.visualViewport.height}px`;
-                        }
-                        // Scroll input into view
-                        inputRef.current?.scrollIntoView({ block: "nearest" });
-                      }, delay);
-                    }
+                    // Single delayed scroll instead of 4x — reduces layout thrashing
+                    setTimeout(() => {
+                      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+                      if (window.visualViewport) {
+                        document.documentElement.style.height = `${window.visualViewport.height}px`;
+                      }
+                      inputRef.current?.scrollIntoView({ block: "nearest" });
+                    }, 150);
                   }}
                   onBlur={() => {
                     document.body.classList.remove("tg-input-focused");
@@ -2328,11 +2387,7 @@ function ChatsContent() {
           {/* Tab content */}
           <div className="flex-1 overflow-auto p-3">
             {userInfoTab === "media" && (() => {
-              const mediaMessages = messages.filter((m) => m.media_path && m.media_type && m.media_type !== "sticker");
-              const photos = mediaMessages.filter((m) => m.media_type === "photo" || (m.media_type === "document" && (() => { const ext = (m.media_path || "").split(".").pop()?.toLowerCase() || ""; return ["jpg","jpeg","png","gif","webp"].includes(ext); })()));
-              const videos = mediaMessages.filter((m) => m.media_type === "video" && !(m.media_path || "").endsWith(".webm"));
-              const files = mediaMessages.filter((m) => m.media_type === "document" && !photos.includes(m));
-              const voices = mediaMessages.filter((m) => m.media_type === "voice");
+              const { photos, videos, files, voices } = mediaByType;
               const subTabs = [
                 { key: "photos" as const, label: "Фото", count: photos.length },
                 { key: "videos" as const, label: "Видео", count: videos.length },
