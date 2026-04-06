@@ -33,6 +33,7 @@ import {
   type TgStatusAccount,
 } from "@/lib";
 import { AppShell, AuthGuard, Badge, Button } from "@/components";
+import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 
 // --- Helpers hoisted outside component to avoid re-creation ---
 const IMAGE_EXTS = new Set(['jpg','jpeg','png','gif','webp','bmp','svg']);
@@ -233,6 +234,274 @@ function formatDateShort(dateStr: string | null, tz?: string): string {
   return cached;
 }
 
+// --- Extracted ContactItem: memoized to prevent re-render when sibling state changes ---
+const ContactItem = memo(function ContactItem({ contact, isSelected, isUnread, unreadCount, isPinned, draft, avatarError, isAdmin, userTimezone, tagMap, onSelect, onPin, onArchive, onDelete, onAvatarError }: {
+  contact: Contact;
+  isSelected: boolean;
+  isUnread: boolean;
+  unreadCount: number;
+  isPinned: boolean;
+  draft: string | undefined;
+  avatarError: boolean;
+  isAdmin: boolean;
+  userTimezone: string;
+  tagMap: Map<string, Tag>;
+  onSelect: () => void;
+  onPin: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+  onAvatarError: () => void;
+}) {
+  const c = contact;
+  return (
+    <div
+      onClick={onSelect}
+      className={`px-4 py-3.5 cursor-pointer border-b border-surface-border/50 transition-all duration-150 ${
+        isSelected
+          ? "bg-brand/5 border-l-2 border-l-brand"
+          : "hover:bg-surface-hover border-l-2 border-l-transparent"
+      }`}
+    >
+      <div className="flex items-start justify-between">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <LazyAvatar contactId={c.id} alias={c.alias} chatType={c.chat_type} hasError={avatarError} onError={onAvatarError} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <span className={`font-medium text-sm truncate ${isUnread ? "text-white" : ""}`}>{c.alias}</span>
+              {isUnread && (
+                <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-brand text-white text-[11px] font-bold flex items-center justify-center shrink-0">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </div>
+            {draft ? (
+              <p className="text-xs truncate mt-0.5 flex items-center gap-1">
+                <span className="text-red-400 font-medium shrink-0">Черновик:</span>
+                <span className="truncate text-slate-400">{draft}</span>
+              </p>
+            ) : c.last_message_content ? (
+              <p className={`text-xs truncate mt-0.5 flex items-center gap-1 ${
+                !isUnread && c.last_message_direction === "incoming"
+                  ? "text-white font-medium"
+                  : "text-slate-500"
+              }`}>
+                {c.last_message_direction === "outgoing" && (
+                  <svg className={`w-3.5 h-3.5 shrink-0 ${c.last_message_is_read ? "text-sky-400" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    {c.last_message_is_read ? (
+                      <><polyline points="1 12 5 16 12 6" /><polyline points="8 12 12 16 20 6" /></>
+                    ) : (
+                      <polyline points="4 12 9 17 20 6" />
+                    )}
+                  </svg>
+                )}
+                <span className="truncate">{c.last_message_content}</span>
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          {c.last_message_at && (
+            <span className={`text-xs ${isUnread ? "text-brand font-medium" : "text-slate-500"}`}>
+              {formatDateShort(c.last_message_at, userTimezone)}
+            </span>
+          )}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={(e) => { e.stopPropagation(); onPin(); }}
+              className={`transition-colors p-0.5 ${isPinned ? "text-brand" : "text-slate-600 hover:text-brand"}`}
+              title={isPinned ? "Unpin" : "Pin"}
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={isPinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 17v5" /><path d="M9 2h6l-1 7h4l-7 8 1-5H8l1-10z" />
+              </svg>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onArchive(); }}
+              className="text-slate-600 hover:text-amber-400 transition-colors p-0.5"
+              title={c.is_archived ? "Разархивировать" : "Архивировать"}
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={c.is_archived ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" />
+              </svg>
+            </button>
+            {isAdmin && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                className="text-slate-600 hover:text-red-400 transition-colors p-0.5 -mr-1"
+                title="Удалить из CRM"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      {c.tags.length > 0 && (
+        <div className="flex gap-1 mt-1.5">
+          {c.tags.map((t) => {
+            const tagInfo = tagMap.get(t);
+            return <Badge key={t} text={t} color={tagInfo?.color} />;
+          })}
+        </div>
+      )}
+    </div>
+  );
+});
+
+// --- Extracted MessageBubble: memoized to prevent re-render of all 200 messages on any state change ---
+const MessageBubble = memo(function MessageBubble({ m, isGroup, forwardMode, isForwardSelected, translation, translatingId, userTimezone, onContextMenu, onTouchStart, onTouchEnd, onTouchMove, onDoubleClick, onToggleForward, onLightbox, onTranslate, onRemoveTranslation, onEditHistory, onPressButton, onSendBtnText, selectedId }: {
+  m: Message;
+  isGroup: boolean;
+  forwardMode: boolean;
+  isForwardSelected: boolean;
+  translation: string | undefined;
+  translatingId: string | null;
+  userTimezone: string;
+  onContextMenu: (e: React.MouseEvent, m: Message) => void;
+  onTouchStart: (e: React.TouchEvent, m: Message) => void;
+  onTouchEnd: () => void;
+  onTouchMove: () => void;
+  onDoubleClick: (m: Message) => void;
+  onToggleForward: (id: string) => void;
+  onLightbox: (src: string) => void;
+  onTranslate: (id: string, content: string, dir: string) => void;
+  onRemoveTranslation: (id: string) => void;
+  onEditHistory: (id: string) => void;
+  onPressButton: (msgId: string, data: string) => void;
+  onSendBtnText: (text: string) => void;
+  selectedId: string | null;
+}) {
+  const buttons = parseInlineButtons(m.inline_buttons);
+  return (
+    <div className="flex items-start gap-2">
+      {forwardMode && (
+        <label className="flex items-center pt-2 cursor-pointer shrink-0">
+          <input type="checkbox" checked={isForwardSelected} onChange={() => onToggleForward(m.id)} className="w-4 h-4 rounded border-surface-border accent-brand" />
+        </label>
+      )}
+      <div
+        className={`max-w-[75%] min-w-0 select-none ${m.direction === "outgoing" ? "ml-auto" : ""}`}
+        onContextMenu={(e) => onContextMenu(e, m)}
+        onTouchStart={(e) => onTouchStart(e, m)}
+        onTouchEnd={onTouchEnd}
+        onTouchMove={onTouchMove}
+        onDoubleClick={() => onDoubleClick(m)}
+      >
+        {m.topic_id && (
+          <div className="text-[10px] text-purple-400 font-medium mb-0.5 ml-1 flex items-center gap-1">
+            <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+            {m.topic_name || (m.topic_id === 1 ? "General" : `Topic #${m.topic_id}`)}
+          </div>
+        )}
+        {m.direction === "incoming" && isGroup && m.sender_alias && (
+          <div className="text-xs text-accent font-medium mb-0.5 ml-1">{m.sender_alias}</div>
+        )}
+        <div
+          id={`msg-${m.id}`}
+          className={`rounded-2xl text-sm overflow-hidden break-words ${
+            m.media_type === "sticker" ? "bg-transparent p-1"
+            : m.is_deleted ? "px-3.5 py-2.5 bg-red-500/20 border border-red-500/40 text-red-200 rounded-br-md"
+            : m.is_edited ? "px-3.5 py-2.5 bg-amber-500/15 border border-amber-400/40 text-amber-100 rounded-br-md"
+            : m.direction === "outgoing" ? "px-3.5 py-2.5 bg-gradient-to-br from-brand to-brand-dark text-white rounded-br-md shadow-[0_2px_8px_rgba(14,165,233,0.2)]"
+            : "px-3.5 py-2.5 bg-surface-card border border-surface-border text-white rounded-bl-md"
+          }`}
+        >
+          {m.reply_to_content_preview && (
+            <div
+              className={`mb-2 pl-2.5 border-l-2 text-xs py-1 rounded-r cursor-pointer break-words ${m.direction === "outgoing" ? "border-white/30 bg-white/10 text-white/70" : "border-brand/40 bg-brand/5 text-slate-400"}`}
+              onClick={() => {
+                if (m.reply_to_msg_id) {
+                  const el = document.getElementById(`msg-${m.reply_to_msg_id}`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  el?.classList.add("ring-1", "ring-brand/40");
+                  setTimeout(() => el?.classList.remove("ring-1", "ring-brand/40"), 2000);
+                }
+              }}
+            >{m.reply_to_content_preview}</div>
+          )}
+          {m.forwarded_from_alias && (
+            <div className={`flex items-center gap-1.5 mb-1 text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 014-4h12" /></svg>
+              Переслано от {m.forwarded_from_alias}
+            </div>
+          )}
+          {m.is_deleted && (
+            <div className="flex items-center gap-1.5 mb-1 text-xs text-red-400/80">
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+              Deleted in Telegram
+            </div>
+          )}
+          {m.media_type === "sticker" && <div className={`text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>Стикер {m.content || ""}</div>}
+          {m.media_type && m.media_type !== "sticker" && !m.media_path && (
+            <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 text-xs text-slate-400">
+              <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-400 rounded-full animate-spin" /> Загрузка медиа...
+            </div>
+          )}
+          {m.media_type && m.media_type !== "sticker" && m.media_path && (
+            <div className="mb-2">
+              {m.media_type === "photo" && <img src={mediaUrl(m.media_path)} alt="" loading="lazy" className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity" onClick={(e) => { e.stopPropagation(); onLightbox(mediaUrl(m.media_path!)); }} />}
+              {m.media_type === "video" && <video src={mediaUrl(m.media_path)} controls preload="none" className="rounded-xl max-w-full max-h-64" />}
+              {m.media_type === "video_note" && <div className="w-48 h-48 rounded-full overflow-hidden border-2 border-brand/30"><video src={mediaUrl(m.media_path)} controls preload="none" className="w-full h-full object-cover" style={{ borderRadius: "50%" }} /></div>}
+              {m.media_type === "voice" && <VoicePlayer src={mediaUrl(m.media_path)} direction={m.direction} />}
+              {m.media_type === "document" && (() => {
+                const fname = m.media_path!.split('/').pop() || '';
+                const ext = fname.includes('.') ? fname.split('.').pop()?.toLowerCase() || '' : '';
+                const isImg = isImageFile(m.media_path!);
+                return (isImg || !ext) ? (
+                  <img src={mediaUrl(m.media_path!)} alt="" loading="lazy" className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity" onClick={(e) => { e.stopPropagation(); onLightbox(mediaUrl(m.media_path!)); }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                ) : (
+                  <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" download className="flex items-center gap-2 text-brand-light hover:underline">
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                    {cleanFileName(m.media_path!)}
+                  </a>
+                );
+              })()}
+            </div>
+          )}
+          {m.content && m.media_type !== "sticker" && <span className={`break-words whitespace-pre-wrap [overflow-wrap:anywhere] ${m.is_deleted ? "line-through" : ""}`}>{m.content}</span>}
+          {translation && (
+            <div className={`mt-1.5 pt-1.5 border-t text-xs italic ${m.direction === "outgoing" ? "border-white/20 text-white/60" : "border-surface-border text-slate-400"}`}>🌐 {translation}</div>
+          )}
+          <div className={`flex items-center justify-end gap-1 text-[10px] mt-1 ${m.direction === "outgoing" ? "text-white/40" : "text-slate-500"}`}>
+            {m.content && !m.media_type && !translation && (
+              <button onClick={(e) => { e.stopPropagation(); onTranslate(m.id, m.content!, m.direction); }} className={`hover:text-brand transition-colors ${translatingId === m.id ? "animate-pulse" : ""}`} title="Перевести">
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 8l6 6" /><path d="M4 14l6-6 2-3" /><path d="M2 5h12" /><path d="M7 2h1" /><path d="M22 22l-5-10-5 10" /><path d="M14 18h6" /></svg>
+              </button>
+            )}
+            {translation && <button onClick={(e) => { e.stopPropagation(); onRemoveTranslation(m.id); }} className="hover:text-brand transition-colors" title="Скрыть перевод">✕</button>}
+            {m.is_edited && (
+              <button onClick={(e) => { e.stopPropagation(); onEditHistory(m.id); }} className="italic mr-1 text-amber-400/70 hover:text-amber-300 cursor-pointer transition-colors" title="Показать историю изменений">(ред.)</button>
+            )}
+            {formatTime(m.created_at, userTimezone)}
+            {m.direction === "outgoing" && (
+              <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                {m.is_read ? (<><polyline points="1 12 5 16 12 6" /><polyline points="8 12 12 16 20 6" /></>) : (<polyline points="4 12 9 17 20 6" />)}
+              </svg>
+            )}
+          </div>
+          {buttons.length > 0 && (
+            <div className="mt-2 space-y-1">
+              {buttons.map((row, ri) => (
+                <div key={ri} className="flex gap-1">
+                  {row.map((btn, bi) => (
+                    <button key={bi} onClick={() => {
+                      if (btn.url) { try { const u = new URL(btn.url, window.location.href); if (u.protocol === "http:" || u.protocol === "https:") window.open(btn.url, "_blank", "noopener,noreferrer"); } catch {} }
+                      else if (btn.callback_data) onPressButton(m.id, btn.callback_data);
+                      else if (btn.send_text) onSendBtnText(btn.send_text);
+                    }} className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-brand/10 border border-brand/20 text-brand hover:bg-brand/20 transition-all min-h-[36px]">{btn.text}</button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
+
 function ChatsContent() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [selected, setSelected] = useState<Contact | null>(null);
@@ -400,6 +669,7 @@ function ChatsContent() {
   const [savingNotes, setSavingNotes] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const selectedRef = useRef<Contact | null>(null);
   const filterAccountRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -595,7 +865,7 @@ function ChatsContent() {
     });
     api(`/api/messages/${selected.id}?limit=200`).then((msgs: Message[]) => {
       setMessages(sortMsgs(msgs));
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 100);
+      setTimeout(() => virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "auto" }), 100);
       // Auto-download missing media in background
       // Always check — backend verifies which files actually exist on disk
       const hasMedia = msgs.some((m: any) => m.media_type && m.media_type !== "sticker");
@@ -634,7 +904,7 @@ function ChatsContent() {
     const topicParam = activeTopic !== null ? `&topic_id=${activeTopic}` : "";
     api(`/api/messages/${selected.id}?limit=200${topicParam}`).then((msgs: Message[]) => {
       setMessages(sortMsgs(msgs));
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 100);
+      setTimeout(() => virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "auto" }), 100);
     }).catch(console.error).finally(() => setLoadingTopic(false));
   }, [activeTopic]);
 
@@ -663,19 +933,12 @@ function ChatsContent() {
     if (selected) justOpenedChat.current = true;
   }, [selected]);
 
+  // Virtuoso handles auto-scroll via followOutput="smooth" + alignToBottom
+  // Only need to scroll on initial chat open
   useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    // Always scroll to bottom when chat first opens
     if (justOpenedChat.current) {
       justOpenedChat.current = false;
-      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-      return;
-    }
-    // Auto-scroll only if user is near the bottom (within 300px)
-    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
-    if (isNearBottom) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setTimeout(() => virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "auto" }), 50);
     }
   }, [messages]);
 
@@ -1108,6 +1371,46 @@ function ChatsContent() {
 
   const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel" || selected?.chat_type === "supergroup";
 
+  // Pre-filter visible messages (memoized)
+  const visibleMessages = useMemo(() =>
+    messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted),
+    [messages]
+  );
+
+  // --- Stable callbacks for MessageBubble (prevent re-creation on every render) ---
+  const handleMsgContextMenu = useCallback((e: React.MouseEvent, m: Message) => {
+    e.preventDefault(); e.stopPropagation();
+    const menuH = 280, menuW = 200;
+    const y = e.clientY + menuH > window.innerHeight ? e.clientY - menuH : e.clientY;
+    const x = Math.min(e.clientX, window.innerWidth - menuW);
+    setContextMenu({ x, y, message: m });
+  }, []);
+  const handleMsgTouchStart = useCallback((e: React.TouchEvent, m: Message) => {
+    longPressTriggered.current = false;
+    longPressTimer.current = setTimeout(() => {
+      longPressTriggered.current = true;
+      const touch = e.touches[0];
+      const menuH = 280, menuW = 200;
+      const y = touch.clientY + menuH > window.innerHeight ? touch.clientY - menuH : touch.clientY;
+      const x = Math.min(touch.clientX, window.innerWidth - menuW);
+      setContextMenu({ x, y, message: m });
+    }, 500);
+  }, []);
+  const handleMsgTouchEnd = useCallback(() => { if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; } }, []);
+  const handleMsgDoubleClick = useCallback((m: Message) => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }, [forwardMode]);
+  const handleMsgLightbox = useCallback((src: string) => setLightboxSrc(src), []);
+  const handleMsgTranslate = useCallback((id: string, content: string, dir: string) => handleTranslate(id, content, dir), [translateLangIn, translateLangOut]);
+  const handleMsgRemoveTranslation = useCallback((id: string) => setTranslations(prev => { const n = new Map(prev); n.delete(id); return n; }), []);
+  const handleMsgEditHistory = useCallback((id: string) => { if (selected) showEditHistory(selected.id, id); }, [selected]);
+  const handleMsgSendBtnText = useCallback((text: string) => {
+    if (!selected) return;
+    const tempId = `temp-${Date.now()}`;
+    setMessages(prev => [...prev, { id: tempId, contact_id: selected.id, tg_message_id: null, direction: "outgoing", content: text, media_type: null, media_path: null, sent_by: null, is_read: false, is_edited: false, is_deleted: false, inline_buttons: null, reply_to_msg_id: null, reply_to_content_preview: null, forwarded_from_alias: null, sender_alias: null, topic_id: null, topic_name: null, created_at: new Date().toISOString() } as any]);
+    api(`/api/messages/${selected.id}/send`, { method: "POST", body: JSON.stringify({ content: text }) })
+      .then(msg => setMessages(prev => prev.map(m => m.id === tempId ? msg : m)))
+      .catch((e: any) => { setMessages(prev => prev.filter(m => m.id !== tempId)); alert(e.message); });
+  }, [selected]);
+
   return (
     <div className="flex h-full overflow-hidden">
       {/* Contact list */}
@@ -1209,105 +1512,27 @@ function ChatsContent() {
             }
             return visible;
           })().map((c) => (
-            <div
+            <ContactItem
               key={c.id}
-              onClick={() => {
-                // Save current draft before switching
+              contact={c}
+              isSelected={selected?.id === c.id}
+              isUnread={unread.has(c.id)}
+              unreadCount={unread.get(c.id) || 0}
+              isPinned={pinned.has(c.id)}
+              draft={drafts.get(c.id)}
+              avatarError={avatarErrors.has(c.id)}
+              isAdmin={isAdmin}
+              userTimezone={userTimezone}
+              tagMap={tagMap}
+              onSelect={() => {
                 if (selected) saveDraft(selected.id, textRef.current);
                 setSelected(c); setShowTags(false); setEditingAlias(false);
               }}
-              className={`px-4 py-3.5 cursor-pointer border-b border-surface-border/50 transition-all duration-150 ${
-                selected?.id === c.id
-                  ? "bg-brand/5 border-l-2 border-l-brand"
-                  : "hover:bg-surface-hover border-l-2 border-l-transparent"
-              }`}
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  {/* Avatar — lazy loaded with IntersectionObserver */}
-                  <LazyAvatar contactId={c.id} alias={c.alias} chatType={c.chat_type} hasError={avatarErrors.has(c.id)} onError={() => setAvatarErrors((prev) => new Set(prev).add(c.id))} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`font-medium text-sm truncate ${unread.has(c.id) ? "text-white" : ""}`}>{c.alias}</span>
-                      {unread.has(c.id) && (
-                        <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-brand text-white text-[11px] font-bold flex items-center justify-center shrink-0">
-                          {unread.get(c.id)! > 99 ? "99+" : unread.get(c.id)}
-                        </span>
-                      )}
-                    </div>
-                    {drafts.has(c.id) ? (
-                      <p className="text-xs truncate mt-0.5 flex items-center gap-1">
-                        <span className="text-red-400 font-medium shrink-0">Черновик:</span>
-                        <span className="truncate text-slate-400">{drafts.get(c.id)}</span>
-                      </p>
-                    ) : c.last_message_content ? (
-                      <p className={`text-xs truncate mt-0.5 flex items-center gap-1 ${
-                        !unread.has(c.id) && c.last_message_direction === "incoming"
-                          ? "text-white font-medium"
-                          : "text-slate-500"
-                      }`}>
-                        {c.last_message_direction === "outgoing" && (
-                          <svg className={`w-3.5 h-3.5 shrink-0 ${c.last_message_is_read ? "text-sky-400" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            {c.last_message_is_read ? (
-                              <><polyline points="1 12 5 16 12 6" /><polyline points="8 12 12 16 20 6" /></>
-                            ) : (
-                              <polyline points="4 12 9 17 20 6" />
-                            )}
-                          </svg>
-                        )}
-                        <span className="truncate">{c.last_message_content}</span>
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="flex flex-col items-end gap-1 shrink-0">
-                  {c.last_message_at && (
-                    <span className={`text-xs ${unread.has(c.id) ? "text-brand font-medium" : "text-slate-500"}`}>
-                      {formatDateShort(c.last_message_at, userTimezone)}
-                    </span>
-                  )}
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); togglePin(c.id); }}
-                      className={`transition-colors p-0.5 ${pinned.has(c.id) ? "text-brand" : "text-slate-600 hover:text-brand"}`}
-                      title={pinned.has(c.id) ? "Unpin" : "Pin"}
-                    >
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={pinned.has(c.id) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 17v5" /><path d="M9 2h6l-1 7h4l-7 8 1-5H8l1-10z" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleArchive(c.id); }}
-                      className="text-slate-600 hover:text-amber-400 transition-colors p-0.5"
-                      title={c.is_archived ? "Разархивировать" : "Архивировать"}
-                    >
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={c.is_archived ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" />
-                      </svg>
-                    </button>
-                    {isAdmin && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); deleteContact(c.id); }}
-                        className="text-slate-600 hover:text-red-400 transition-colors p-0.5 -mr-1"
-                        title="Удалить из CRM"
-                      >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-              {c.tags.length > 0 && (
-                <div className="flex gap-1 mt-1.5">
-                  {c.tags.map((t) => {
-                    const tagInfo = tagMap.get(t);
-                    return <Badge key={t} text={t} color={tagInfo?.color} />;
-                  })}
-                </div>
-              )}
-            </div>
+              onPin={() => togglePin(c.id)}
+              onArchive={() => handleArchive(c.id)}
+              onDelete={() => deleteContact(c.id)}
+              onAvatarError={() => setAvatarErrors((prev) => new Set(prev).add(c.id))}
+            />
           ))}
           {visibleCount < filteredContacts.length && (
             <div className="w-full py-3 flex items-center justify-center gap-2 text-xs text-slate-500">
@@ -1327,7 +1552,7 @@ function ChatsContent() {
       </div>
 
       {/* Chat area */}
-      <div className={`flex-1 flex flex-col min-w-0 ${!selected ? "hidden md:flex" : ""}`}>
+      <div className={`flex-1 flex flex-col min-w-0 min-h-0 ${!selected ? "hidden md:flex" : ""}`}>
         {selected ? (
           <>
             {/* Header */}
@@ -1576,358 +1801,96 @@ function ChatsContent() {
               </div>
             )}
 
-            {/* Messages */}
-            <div
-              ref={messagesContainerRef}
-              className="flex-1 overflow-auto overflow-x-hidden p-4 space-y-2 relative"
-              onScroll={(e) => {
-                const el = e.currentTarget;
-                const s = el.scrollHeight - el.scrollTop - el.clientHeight > 300;
-                setShowScrollBtn((p) => p === s ? p : s);
-              }}
-            >
+            {/* Messages — virtualized list for performance */}
+            <div className="flex-1 min-h-0 overflow-hidden relative">
               {(loadingMessages || loadingTopic) && (
-                <div className="flex items-center justify-center py-8">
+                <div className="absolute inset-0 flex items-center justify-center z-10 bg-surface/50">
                   <div className="w-6 h-6 border-2 border-brand/30 border-t-brand rounded-full animate-spin" />
                   <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
                 </div>
               )}
-              {messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted).map((m) => {
-                const buttons = parseInlineButtons(m.inline_buttons);
-                const groupedId = (m as any).grouped_id as number | null;
-                if (groupedId) {
-                  const albumMsgs = albumMap.get(groupedId) || [];
-                  const isFirst = albumMsgs[0]?.id === m.id;
-                  if (!isFirst) return null; // skip non-first album messages
-                  const albumCaption = albumMsgs.find((am: any) => am.content)?.content;
-                  return (
-                    <div key={m.id} className="flex items-start gap-2">
-                      <div className={`max-w-[320px] ${m.direction === "outgoing" ? "ml-auto" : ""}`}>
-                        <div className={`rounded-2xl overflow-hidden ${m.direction === "outgoing" ? "bg-brand" : "bg-surface-card border border-surface-border"}`}>
-                          <div className={`grid ${albumMsgs.length === 1 ? "grid-cols-1" : "grid-cols-2"} gap-0.5`}>
-                            {albumMsgs.map((am: any) => (
-                              <div key={am.id} className={`overflow-hidden ${albumMsgs.length === 3 && am === albumMsgs[0] ? "col-span-2" : ""}`}>
-                                {am.media_type === "video" ? (
-                                  <video src={mediaUrl(am.media_path)} controls preload="none" className="w-full aspect-square object-cover" />
-                                ) : (
-                                  <img src={mediaUrl(am.media_path)} alt="" loading="lazy" className="w-full aspect-square object-cover cursor-pointer hover:opacity-90"
-                                    onClick={() => setLightboxSrc(mediaUrl(am.media_path))} />
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                          {albumCaption && (
-                            <div className={`px-3 py-1.5 text-sm ${m.direction === "outgoing" ? "text-white" : "text-slate-200"}`}>
-                              <span className="break-words whitespace-pre-wrap">{albumCaption}</span>
-                            </div>
-                          )}
-                          <div className={`px-3 py-1 flex justify-end ${m.direction === "outgoing" ? "text-white/50" : "text-slate-500"}`}>
-                            <span className="text-[10px]">{formatTime((m as any).created_at)}</span>
-                            {m.direction === "outgoing" && <span className="text-[10px] ml-1">{m.is_read ? "✓✓" : "✓"}</span>}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }
-                return (
-                  <div key={m.id} className="flex items-start gap-2">
-                    {/* Forward checkbox */}
-                    {forwardMode && (
-                      <label className="flex items-center pt-2 cursor-pointer shrink-0">
-                        <input
-                          type="checkbox"
-                          checked={forwardSelected.has(m.id)}
-                          onChange={() => toggleForwardSelect(m.id)}
-                          className="w-4 h-4 rounded border-surface-border accent-brand"
-                        />
-                      </label>
-                    )}
-
-                    <div
-                      className={`max-w-[75%] min-w-0 select-none ${m.direction === "outgoing" ? "ml-auto" : ""}`}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const menuH = 280;
-                        const menuW = 200;
-                        const y = e.clientY + menuH > window.innerHeight ? e.clientY - menuH : e.clientY;
-                        const x = Math.min(e.clientX, window.innerWidth - menuW);
-                        setContextMenu({ x, y, message: m });
-                      }}
-                      onTouchStart={(e) => {
-                        longPressTriggered.current = false;
-                        longPressTimer.current = setTimeout(() => {
-                          longPressTriggered.current = true;
-                          const touch = e.touches[0];
-                          const menuH = 280;
-                          const menuW = 200;
-                          const y = touch.clientY + menuH > window.innerHeight ? touch.clientY - menuH : touch.clientY;
-                          const x = Math.min(touch.clientX, window.innerWidth - menuW);
-                          setContextMenu({ x, y, message: m });
-                        }, 500);
-                      }}
-                      onTouchEnd={() => { if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; } }}
-                      onTouchMove={() => { if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; } }}
-                      onDoubleClick={() => { if (!forwardMode) { setReplyTo(m); inputRef.current?.focus(); } }}
-                    >
-                      {/* Topic badge for forum supergroups */}
-                      {m.topic_id && (
-                        <div className="text-[10px] text-purple-400 font-medium mb-0.5 ml-1 flex items-center gap-1">
-                          <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                          </svg>
-                          {m.topic_name || (m.topic_id === 1 ? "General" : `Topic #${m.topic_id}`)}
-                        </div>
-                      )}
-                      {/* Sender alias for group messages */}
-                      {m.direction === "incoming" && isGroup && m.sender_alias && (
-                        <div className="text-xs text-accent font-medium mb-0.5 ml-1">{m.sender_alias}</div>
-                      )}
-
-                      <div
-                        id={`msg-${m.id}`}
-                        className={`rounded-2xl text-sm overflow-hidden break-words ${
-                          m.media_type === "sticker"
-                            ? "bg-transparent p-1"
-                            : m.is_deleted
-                            ? "px-3.5 py-2.5 bg-red-500/20 border border-red-500/40 text-red-200 rounded-br-md"
-                            : m.is_edited
-                            ? "px-3.5 py-2.5 bg-amber-500/15 border border-amber-400/40 text-amber-100 rounded-br-md"
-                            : m.direction === "outgoing"
-                            ? "px-3.5 py-2.5 bg-gradient-to-br from-brand to-brand-dark text-white rounded-br-md shadow-[0_2px_8px_rgba(14,165,233,0.2)]"
-                            : "px-3.5 py-2.5 bg-surface-card border border-surface-border text-white rounded-bl-md"
-                        }`}
-                      >
-                        {/* Reply quote */}
-                        {m.reply_to_content_preview && (
-                          <div
-                            className={`mb-2 pl-2.5 border-l-2 text-xs py-1 rounded-r cursor-pointer break-words ${
-                              m.direction === "outgoing"
-                                ? "border-white/30 bg-white/10 text-white/70"
-                                : "border-brand/40 bg-brand/5 text-slate-400"
-                            }`}
-                            onClick={() => {
-                              if (m.reply_to_msg_id) {
-                                const el = document.getElementById(`msg-${m.reply_to_msg_id}`);
-                                el?.scrollIntoView({ behavior: "smooth", block: "center" });
-                                el?.classList.add("ring-1", "ring-brand/40");
-                                setTimeout(() => el?.classList.remove("ring-1", "ring-brand/40"), 2000);
-                              }
-                            }}
-                          >
-                            {m.reply_to_content_preview}
-                          </div>
-                        )}
-
-                        {/* Forwarded label */}
-                        {m.forwarded_from_alias && (
-                          <div className={`flex items-center gap-1.5 mb-1 text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>
-                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="15 17 20 12 15 7" />
-                              <path d="M4 18v-2a4 4 0 014-4h12" />
-                            </svg>
-                            Переслано от {m.forwarded_from_alias}
-                          </div>
-                        )}
-
-                        {/* Deleted indicator */}
-                        {m.is_deleted && (
-                          <div className="flex items-center gap-1.5 mb-1 text-xs text-red-400/80">
-                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-                            </svg>
-                            Deleted in Telegram
-                          </div>
-                        )}
-
-                        {/* Sticker — just label */}
-                        {m.media_type === "sticker" && (
-                          <div className={`text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>Стикер {m.content || ""}</div>
-                        )}
-                        {/* Loading placeholder for media being downloaded */}
-                        {m.media_type && m.media_type !== "sticker" && !m.media_path && (
-                          <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 text-xs text-slate-400">
-                            <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-400 rounded-full animate-spin" />
-                            Загрузка медиа...
-                          </div>
-                        )}
-
-                        {m.media_type && m.media_type !== "sticker" && m.media_path && (
-                          <div className="mb-2">
-                            {m.media_type === "photo" && (
-                              <img
-                                src={mediaUrl(m.media_path)}
-                                alt=""
-                                loading="lazy"
-                                className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                                onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
-                              />
-                            )}
-                            {m.media_type === "video" && (
-                              <video src={mediaUrl(m.media_path)} controls preload="none" className="rounded-xl max-w-full max-h-64" />
-                            )}
-                            {m.media_type === "video_note" && (
-                              <div className="w-48 h-48 rounded-full overflow-hidden border-2 border-brand/30">
-                                <video src={mediaUrl(m.media_path)} controls preload="none" className="w-full h-full object-cover" style={{ borderRadius: "50%" }} />
-                              </div>
-                            )}
-                            {m.media_type === "voice" && (
-                              <VoicePlayer src={mediaUrl(m.media_path)} direction={m.direction} />
-                            )}
-                            {m.media_type === "document" && (() => {
-                              const fname = m.media_path!.split('/').pop() || '';
-                              const ext = fname.includes('.') ? fname.split('.').pop()?.toLowerCase() || '' : '';
-                              const isImage = isImageFile(m.media_path!);
-                              return isImage ? (
-                                <img
-                                  src={mediaUrl(m.media_path!)}
-                                  alt=""
-                                  loading="lazy"
-                                  className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                                  onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
-                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                />
-                              ) : !ext ? (
-                                <img
-                                  src={mediaUrl(m.media_path!)}
-                                  alt=""
-                                  loading="lazy"
-                                  className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                                  onClick={(e) => { e.stopPropagation(); setLightboxSrc(mediaUrl(m.media_path!)); }}
-                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                />
-                              ) : (
-                                <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" download className="flex items-center gap-2 text-brand-light hover:underline">
-                                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                                    <polyline points="14 2 14 8 20 8" />
-                                  </svg>
-                                  {cleanFileName(m.media_path!)}
-                                </a>
-                              );
-                            })()}
-                          </div>
-                        )}
-
-                        {/* Content (skip for stickers — already shown above) */}
-                        {m.content && m.media_type !== "sticker" && <span className={`break-words whitespace-pre-wrap [overflow-wrap:anywhere] ${m.is_deleted ? "line-through" : ""}`}>{m.content}</span>}
-
-                        {/* Translation */}
-                        {translations.has(m.id) && (
-                          <div className={`mt-1.5 pt-1.5 border-t text-xs italic ${m.direction === "outgoing" ? "border-white/20 text-white/60" : "border-surface-border text-slate-400"}`}>
-                            🌐 {translations.get(m.id)}
-                          </div>
-                        )}
-
-                        {/* Timestamp + translate + edited + read status */}
-                        <div className={`flex items-center justify-end gap-1 text-[10px] mt-1 ${m.direction === "outgoing" ? "text-white/40" : "text-slate-500"}`}>
-                          {/* Translate button — text-only messages */}
-                          {m.content && !m.media_type && !translations.has(m.id) && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleTranslate(m.id, m.content!, m.direction); }}
-                              className={`hover:text-brand transition-colors ${translating === m.id ? "animate-pulse" : ""}`}
-                              title="Перевести"
-                            >
-                              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M5 8l6 6" /><path d="M4 14l6-6 2-3" /><path d="M2 5h12" /><path d="M7 2h1" />
-                                <path d="M22 22l-5-10-5 10" /><path d="M14 18h6" />
-                              </svg>
-                            </button>
-                          )}
-                          {translations.has(m.id) && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setTranslations((prev) => { const n = new Map(prev); n.delete(m.id); return n; }); }}
-                              className="hover:text-brand transition-colors"
-                              title="Скрыть перевод"
-                            >
-                              ✕
-                            </button>
-                          )}
-                          {m.is_edited && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); showEditHistory(selected!.id, m.id); }}
-                              className="italic mr-1 text-amber-400/70 hover:text-amber-300 cursor-pointer transition-colors"
-                              title="Показать историю изменений"
-                            >
-                              (ред.)
-                            </button>
-                          )}
-                          {formatTime(m.created_at, userTimezone)}
-                          {m.direction === "outgoing" && (
-                            <svg className={`w-3.5 h-3.5 ${m.is_read ? "text-sky-300" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                              {m.is_read ? (
-                                <>
-                                  <polyline points="1 12 5 16 12 6" />
-                                  <polyline points="8 12 12 16 20 6" />
-                                </>
-                              ) : (
-                                <polyline points="4 12 9 17 20 6" />
-                              )}
-                            </svg>
-                          )}
-                        </div>
-
-                        {/* Inline bot buttons */}
-                        {buttons.length > 0 && (
-                          <div className="mt-2 space-y-1">
-                            {buttons.map((row, ri) => (
-                              <div key={ri} className="flex gap-1">
-                                {row.map((btn, bi) => (
-                                  <button
-                                    key={bi}
-                                    onClick={() => {
-                                      if (btn.url) {
-                                        try {
-                                          const u = new URL(btn.url, window.location.href);
-                                          if (u.protocol === "http:" || u.protocol === "https:") {
-                                            window.open(btn.url, "_blank", "noopener,noreferrer");
-                                          }
-                                        } catch {}
-                                      } else if (btn.callback_data) {
-                                        handlePressButton(m.id, btn.callback_data);
-                                      } else if (btn.send_text && selected) {
-                                        const tempId = `temp-${Date.now()}`;
-                                        setMessages((prev) => [...prev, {
-                                          id: tempId, contact_id: selected.id, tg_message_id: null,
-                                          direction: "outgoing", content: btn.send_text!, media_type: null,
-                                          media_path: null, sent_by: null, is_read: false, is_edited: false,
-                                          is_deleted: false, inline_buttons: null, reply_to_msg_id: null,
-                                          reply_to_content_preview: null, forwarded_from_alias: null,
-                                          sender_alias: null, topic_id: null, topic_name: null,
-                                          created_at: new Date().toISOString(),
-                                        } as any]);
-                                        api(`/api/messages/${selected.id}/send`, {
-                                          method: "POST",
-                                          body: JSON.stringify({ content: btn.send_text }),
-                                        }).then((msg) => {
-                                          setMessages((prev) => prev.map((m) => m.id === tempId ? msg : m));
-                                        }).catch((e: any) => {
-                                          setMessages((prev) => prev.filter((m) => m.id !== tempId));
-                                          alert(e.message);
-                                        });
-                                      }
-                                    }}
-                                    className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-brand/10 border border-brand/20 text-brand hover:bg-brand/20 transition-all min-h-[36px]"
-                                  >
-                                    {btn.text}
-                                  </button>
+              <Virtuoso
+                ref={virtuosoRef}
+                data={visibleMessages}
+                initialTopMostItemIndex={visibleMessages.length - 1}
+                followOutput="smooth"
+                alignToBottom
+                className="overflow-x-hidden"
+                style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
+                atTopStateChange={(atTop) => {}}
+                atBottomStateChange={(atBottom) => setShowScrollBtn((p) => { const s = !atBottom; return p === s ? p : s; })}
+                itemContent={(index, m) => {
+                  const groupedId = (m as any).grouped_id as number | null;
+                  if (groupedId) {
+                    const albumMsgs = albumMap.get(groupedId) || [];
+                    const isFirst = albumMsgs[0]?.id === m.id;
+                    if (!isFirst) return <div style={{ height: 0, overflow: "hidden" }} />;
+                    const albumCaption = albumMsgs.find((am: any) => am.content)?.content;
+                    return (
+                      <div className="px-4 py-1">
+                        <div className="flex items-start gap-2">
+                          <div className={`max-w-[320px] ${m.direction === "outgoing" ? "ml-auto" : ""}`}>
+                            <div className={`rounded-2xl overflow-hidden ${m.direction === "outgoing" ? "bg-brand" : "bg-surface-card border border-surface-border"}`}>
+                              <div className={`grid ${albumMsgs.length === 1 ? "grid-cols-1" : "grid-cols-2"} gap-0.5`}>
+                                {albumMsgs.map((am: any) => (
+                                  <div key={am.id} className={`overflow-hidden ${albumMsgs.length === 3 && am === albumMsgs[0] ? "col-span-2" : ""}`}>
+                                    {am.media_type === "video" ? (
+                                      <video src={mediaUrl(am.media_path)} controls preload="none" className="w-full aspect-square object-cover" />
+                                    ) : (
+                                      <img src={mediaUrl(am.media_path)} alt="" loading="lazy" className="w-full aspect-square object-cover cursor-pointer hover:opacity-90"
+                                        onClick={() => setLightboxSrc(mediaUrl(am.media_path))} />
+                                    )}
+                                  </div>
                                 ))}
                               </div>
-                            ))}
+                              {albumCaption && (
+                                <div className={`px-3 py-1.5 text-sm ${m.direction === "outgoing" ? "text-white" : "text-slate-200"}`}>
+                                  <span className="break-words whitespace-pre-wrap">{albumCaption}</span>
+                                </div>
+                              )}
+                              <div className={`px-3 py-1 flex justify-end ${m.direction === "outgoing" ? "text-white/50" : "text-slate-500"}`}>
+                                <span className="text-[10px]">{formatTime((m as any).created_at)}</span>
+                                {m.direction === "outgoing" && <span className="text-[10px] ml-1">{m.is_read ? "✓✓" : "✓"}</span>}
+                              </div>
+                            </div>
                           </div>
-                        )}
+                        </div>
                       </div>
+                    );
+                  }
+                  return (
+                    <div className="px-4 py-1">
+                      <MessageBubble
+                        m={m}
+                        isGroup={isGroup}
+                        forwardMode={forwardMode}
+                        isForwardSelected={forwardSelected.has(m.id)}
+                        translation={translations.get(m.id)}
+                        translatingId={translating}
+                        userTimezone={userTimezone}
+                        onContextMenu={handleMsgContextMenu}
+                        onTouchStart={handleMsgTouchStart}
+                        onTouchEnd={handleMsgTouchEnd}
+                        onTouchMove={handleMsgTouchEnd}
+                        onDoubleClick={handleMsgDoubleClick}
+                        onToggleForward={toggleForwardSelect}
+                        onLightbox={handleMsgLightbox}
+                        onTranslate={handleMsgTranslate}
+                        onRemoveTranslation={handleMsgRemoveTranslation}
+                        onEditHistory={handleMsgEditHistory}
+                        onPressButton={handlePressButton}
+                        onSendBtnText={handleMsgSendBtnText}
+                        selectedId={selected?.id || null}
+                      />
                     </div>
-                  </div>
-                );
-              })}
-              <div ref={messagesEndRef} />
+                  );
+                }}
+              />
               {/* Scroll to bottom button */}
               {showScrollBtn && (
                 <button
-                  onClick={() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })}
-                  className="sticky bottom-2 left-1/2 -translate-x-1/2 w-10 h-10 bg-surface-card border border-surface-border rounded-full flex items-center justify-center shadow-lg hover:bg-surface-hover transition-all z-10"
+                  onClick={() => virtuosoRef.current?.scrollToIndex({ index: visibleMessages.length - 1, behavior: "smooth" })}
+                  className="absolute bottom-2 left-1/2 -translate-x-1/2 w-10 h-10 bg-surface-card border border-surface-border rounded-full flex items-center justify-center shadow-lg hover:bg-surface-hover transition-all z-10"
                 >
                   <svg className="w-5 h-5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="6 9 12 15 18 9" />
@@ -2289,7 +2252,7 @@ function ChatsContent() {
                     if (nav) nav.style.display = "none";
                     // Single delayed scroll instead of 4x — reduces layout thrashing
                     setTimeout(() => {
-                      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+                      virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "auto" });
                       if (window.visualViewport) {
                         document.documentElement.style.height = `${window.visualViewport.height}px`;
                       }
