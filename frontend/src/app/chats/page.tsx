@@ -501,9 +501,10 @@ function ChatsContent() {
     return unsub;
   }, []);
 
-  // Polling fallback: refresh contacts (60s when WS connected, 15s when not)
+  // Polling fallback: refresh contacts only when WS is down
   useEffect(() => {
     const interval = setInterval(() => {
+      if (isWSConnected()) return; // Skip — WS handles updates
       const acctId = filterAccountRef.current || undefined;
       Promise.all([
         fetchContacts(undefined, acctId, false),
@@ -511,7 +512,6 @@ function ChatsContent() {
       ]).then(([normal, archived]) => {
         const all = [...normal, ...archived];
         setContacts((prev) => {
-          // Fast comparison: check length + last few timestamps instead of JSON.stringify
           if (all.length !== prev.length) return all;
           for (let i = 0; i < Math.min(5, all.length); i++) {
             if (all[i].last_message_at !== prev[i].last_message_at) return all;
@@ -519,7 +519,7 @@ function ChatsContent() {
           return prev;
         });
       }).catch(() => {});
-    }, isWSConnected() ? 60000 : 15000);
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -538,9 +538,7 @@ function ChatsContent() {
     });
     api(`/api/messages/${selected.id}?limit=200`).then((msgs: Message[]) => {
       setMessages(sortMsgs(msgs));
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 50);
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 200);
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 500);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "instant" }), 100);
       // Auto-download missing media in background
       // Always check — backend verifies which files actually exist on disk
       const hasMedia = msgs.some((m: any) => m.media_type && m.media_type !== "sticker");
@@ -584,21 +582,21 @@ function ChatsContent() {
     }).catch(console.error).finally(() => setLoadingTopic(false));
   }, [activeTopic]);
 
-  // Message polling: 30s when WS connected, 5s when not
+  // Message polling: only when WS is down
   useEffect(() => {
     if (!selected) return;
     const topicParam = activeTopic !== null ? `&topic_id=${activeTopic}` : "";
     const interval = setInterval(() => {
+      if (isWSConnected()) return; // Skip — WS handles updates
       api(`/api/messages/${selected.id}?limit=200${topicParam}`).then((msgs: Message[]) => {
         const sorted = sortMsgs(msgs);
         setMessages((prev) => {
           if (sorted.length !== prev.length) return sorted;
-          // Fast check: compare last message id instead of JSON.stringify
           if (sorted.length > 0 && prev.length > 0 && sorted[sorted.length-1].id !== prev[prev.length-1].id) return sorted;
           return prev;
         });
       }).catch(() => {});
-    }, isWSConnected() ? 30000 : 5000);
+    }, 10000);
     return () => clearInterval(interval);
   }, [selected, activeTopic]);
 
@@ -1019,6 +1017,19 @@ function ChatsContent() {
       const bDate = b.last_message_at || b.created_at || "";
       return bDate.localeCompare(aDate);
     }), [contacts, showArchived, search, filterTag, pinned, drafts]);
+
+  // Pre-compute album groups for message rendering (O(n) instead of O(n²))
+  const albumMap = useMemo(() => {
+    const map = new Map<number, Message[]>();
+    messages.forEach(m => {
+      const gid = (m as any).grouped_id;
+      if (gid && m.media_path) {
+        if (!map.has(gid)) map.set(gid, []);
+        map.get(gid)!.push(m);
+      }
+    });
+    return map;
+  }, [messages]);
 
   const isGroup = selected?.chat_type === "group" || selected?.chat_type === "channel" || selected?.chat_type === "supergroup";
 
@@ -1514,19 +1525,11 @@ function ChatsContent() {
                   <span className="ml-2 text-xs text-slate-400">Загрузка сообщений...</span>
                 </div>
               )}
-              {(() => {
-                // Group consecutive messages with same grouped_id into albums
-                const filtered = messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted);
-                const albumIds = new Set<number>();
-                filtered.forEach(m => { if ((m as any).grouped_id) albumIds.add((m as any).grouped_id); });
-                const renderedAlbums = new Set<number>();
-                return filtered;
-              })().map((m) => {
+              {messages.filter(m => m.content || m.media_path || m.media_type || m.is_deleted).map((m) => {
                 const buttons = parseInlineButtons(m.inline_buttons);
                 const groupedId = (m as any).grouped_id as number | null;
-                // If part of album, render album grid on first message, skip rest
                 if (groupedId) {
-                  const albumMsgs = messages.filter((am: any) => am.grouped_id === groupedId && am.media_path);
+                  const albumMsgs = albumMap.get(groupedId) || [];
                   const isFirst = albumMsgs[0]?.id === m.id;
                   if (!isFirst) return null; // skip non-first album messages
                   const albumCaption = albumMsgs.find((am: any) => am.content)?.content;

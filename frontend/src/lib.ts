@@ -126,33 +126,36 @@ export async function connectWS() {
   const pathBase = window.location.pathname.match(/^\/(crm)\b/)?.[0] || "";
   _ws = new WebSocket(`${wsBase}${pathBase}/ws?token=${tokens.access_token}`);
 
+  let _pingInterval: ReturnType<typeof setInterval> | null = null;
+
   _ws.onopen = () => {
     _wsRetries = 0;
-    // Send ping every 30s to keep connection alive
-    const pingInterval = setInterval(() => {
+    _pingInterval = setInterval(() => {
       if (_ws?.readyState === WebSocket.OPEN) {
         _ws.send("ping");
-      } else {
-        clearInterval(pingInterval);
       }
     }, 30000);
   };
 
   _ws.onmessage = (e) => {
     try {
-      if (e.data === "pong") return; // Ignore pong responses
+      if (e.data === "pong") return;
       const data = JSON.parse(e.data);
-      if (data.type === "ping") return; // Ignore server pings
+      if (data.type === "ping") return;
       _handlers.forEach((h) => h(data));
     } catch { /* ignore parse errors */ }
   };
 
   _ws.onclose = () => {
+    if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
     _ws = null;
     if (_wsRetries < WS_MAX_RETRIES) {
       const delay = Math.min(3000 * Math.pow(1.5, _wsRetries), 30000);
       _wsRetries++;
       setTimeout(() => connectWS(), delay);
+    } else {
+      // Notify UI that WS permanently failed
+      _handlers.forEach((h) => h({ type: "ws_disconnected" }));
     }
   };
 }
@@ -378,27 +381,17 @@ export function mediaUrl(media_path: string): string {
 }
 
 export async function uploadMedia(contactId: string, file: File, caption?: string): Promise<any> {
-  const tokens = getTokens();
   const formData = new FormData();
   formData.append("file", file);
 
-  const url = new URL(`${API}/api/messages/${contactId}/send-media`);
-  if (caption) url.searchParams.set("caption", caption);
+  const url = `${API}/api/messages/${contactId}/send-media${caption ? `?caption=${encodeURIComponent(caption)}` : ""}`;
 
-  const res = await fetch(url.toString(), {
+  // Use api() wrapper for automatic token refresh on 401
+  return api(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${tokens?.access_token}`,
-    },
     body: formData,
+    headers: {}, // empty headers — api() adds Auth, but we need to skip Content-Type for FormData
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Upload failed");
-  }
-
-  return res.json();
 }
 
 export interface StaffMember {
