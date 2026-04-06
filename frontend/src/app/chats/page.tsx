@@ -2026,7 +2026,7 @@ function ChatsContent() {
             )}
 
             {/* Input */}
-            <div className="px-2 py-1 md:p-3 border-t border-surface-border bg-surface-card shrink-0">
+            <div className="px-2 py-0.5 md:p-3 border-t border-surface-border bg-surface-card shrink-0">
               <div className="flex gap-1 items-center bg-surface-card border border-surface-border rounded-2xl px-1">
                 <input
                   ref={fileInputRef}
@@ -2160,19 +2160,23 @@ function ChatsContent() {
                   className="flex-1 bg-transparent py-3 text-sm focus:outline-none placeholder:text-slate-600 resize-none max-h-32 overflow-y-auto"
                   style={{ height: "auto" }}
                   onFocus={() => {
-                    // Hide bottom nav on focus to remove gap between input and keyboard
+                    // Hide bottom nav and remove all bottom padding for flush keyboard
+                    document.body.classList.add("tg-input-focused");
                     const nav = document.getElementById("bottom-nav");
                     if (nav) nav.style.display = "none";
-                    for (const delay of [100, 300, 500, 800]) {
+                    for (const delay of [50, 150, 300, 500]) {
                       setTimeout(() => {
                         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
                         if (window.visualViewport) {
                           document.documentElement.style.height = `${window.visualViewport.height}px`;
                         }
+                        // Scroll input into view
+                        inputRef.current?.scrollIntoView({ block: "nearest" });
                       }, delay);
                     }
                   }}
                   onBlur={() => {
+                    document.body.classList.remove("tg-input-focused");
                     document.documentElement.style.height = "";
                     const nav = document.getElementById("bottom-nav");
                     if (nav) nav.style.display = "";

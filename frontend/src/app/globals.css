@@ -44,6 +44,15 @@ body {
   }
 }
 
+/* Telegram Mini App: remove bottom padding when keyboard is open */
+.tg-input-focused #bottom-nav {
+  display: none !important;
+}
+.tg-input-focused {
+  padding-bottom: 0 !important;
+  margin-bottom: 0 !important;
+}
+
 /* Prevent rubber-band scrolling on iOS inside chat */
 .overflow-auto {
   -webkit-overflow-scrolling: touch;
