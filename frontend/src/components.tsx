@@ -237,10 +237,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       {/* Main content */}
-      <main className={`flex-1 min-h-0 ${pathname === "/chats" ? "overflow-hidden" : "overflow-auto pb-[52px] md:pb-0"}`}>{children}</main>
+      <main className={`flex-1 min-h-0 ${pathname === "/chats" ? "overflow-hidden" : "overflow-auto pb-[60px] md:pb-0"}`}>{children}</main>
 
       {/* Bottom nav */}
-      <nav className={`${isTg ? "" : "md:hidden"} ${isEmbedded && !isTg ? "hidden md:hidden" : ""} fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border flex justify-around z-50`} style={{ height: 52 }} id="bottom-nav">
+      <nav className={`${isTg ? "" : "md:hidden"} ${isEmbedded && !isTg ? "hidden md:hidden" : ""} fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border flex justify-around z-50`} style={{ height: 60 }} id="bottom-nav">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = pathname.startsWith(item.href);
@@ -248,11 +248,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex flex-col items-center gap-0.5 text-[10px] transition-colors min-w-[44px] h-full justify-center pt-1.5 ${
+              className={`flex flex-col items-center gap-0.5 text-[11px] transition-colors min-w-[52px] h-full justify-center pt-1 ${
                 active ? "text-brand" : "text-slate-400"
               }`}
             >
-              <Icon className="w-5 h-5" />
+              <Icon className="w-6 h-6" />
               {item.label}
             </Link>
           );

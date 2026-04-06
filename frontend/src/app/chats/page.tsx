@@ -2026,7 +2026,7 @@ function ChatsContent() {
             )}
 
             {/* Input */}
-            <div className="px-2 py-1.5 md:p-3 border-t border-surface-border bg-surface-card shrink-0">
+            <div className="px-2 py-1 md:p-3 border-t border-surface-border bg-surface-card shrink-0">
               <div className="flex gap-1 items-center bg-surface-card border border-surface-border rounded-2xl px-1">
                 <input
                   ref={fileInputRef}
@@ -2160,22 +2160,22 @@ function ChatsContent() {
                   className="flex-1 bg-transparent py-3 text-sm focus:outline-none placeholder:text-slate-600 resize-none max-h-32 overflow-y-auto"
                   style={{ height: "auto" }}
                   onFocus={() => {
-                    // On mobile, scroll to bottom after keyboard opens
-                    // Multiple delays to catch different keyboard animation speeds
+                    // Hide bottom nav on focus to remove gap between input and keyboard
+                    const nav = document.getElementById("bottom-nav");
+                    if (nav) nav.style.display = "none";
                     for (const delay of [100, 300, 500, 800]) {
                       setTimeout(() => {
                         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-                        // Also ensure input is visible
                         if (window.visualViewport) {
-                          const vv = window.visualViewport;
-                          document.documentElement.style.height = `${vv.height}px`;
+                          document.documentElement.style.height = `${window.visualViewport.height}px`;
                         }
                       }, delay);
                     }
                   }}
                   onBlur={() => {
-                    // Reset height when keyboard closes
                     document.documentElement.style.height = "";
+                    const nav = document.getElementById("bottom-nav");
+                    if (nav) nav.style.display = "";
                   }}
                   onInput={(e) => {
                     const target = e.target as HTMLTextAreaElement;
