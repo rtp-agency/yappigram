@@ -164,6 +164,10 @@ export function onWSEvent(handler: WSHandler): () => void {
   };
 }
 
+export function isWSConnected(): boolean {
+  return _ws?.readyState === WebSocket.OPEN;
+}
+
 export function disconnectWS() {
   _ws?.close();
   _ws = null;

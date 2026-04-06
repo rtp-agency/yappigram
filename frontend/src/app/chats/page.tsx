@@ -6,6 +6,7 @@ import {
   archiveContact,
   avatarUrl,
   connectWS,
+  isWSConnected,
   createGroup,
   editMessage,
   fetchContacts,
@@ -477,7 +478,7 @@ function ChatsContent() {
     return unsub;
   }, []);
 
-  // Polling fallback: refresh contacts every 10s (handles WS being down)
+  // Polling fallback: refresh contacts (60s when WS connected, 15s when not)
   useEffect(() => {
     const interval = setInterval(() => {
       const acctId = filterAccountRef.current || undefined;
@@ -487,13 +488,15 @@ function ChatsContent() {
       ]).then(([normal, archived]) => {
         const all = [...normal, ...archived];
         setContacts((prev) => {
-          if (JSON.stringify(all.map((c: Contact) => c.last_message_at)) !== JSON.stringify(prev.map((c: Contact) => c.last_message_at))) {
-            return all;
+          // Fast comparison: check length + last few timestamps instead of JSON.stringify
+          if (all.length !== prev.length) return all;
+          for (let i = 0; i < Math.min(5, all.length); i++) {
+            if (all[i].last_message_at !== prev[i].last_message_at) return all;
           }
           return prev;
         });
       }).catch(() => {});
-    }, 30000);  // 30s fallback — WS handles real-time updates
+    }, isWSConnected() ? 60000 : 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -558,6 +561,7 @@ function ChatsContent() {
     }).catch(console.error).finally(() => setLoadingTopic(false));
   }, [activeTopic]);
 
+  // Message polling: 30s when WS connected, 5s when not
   useEffect(() => {
     if (!selected) return;
     const topicParam = activeTopic !== null ? `&topic_id=${activeTopic}` : "";
@@ -565,11 +569,13 @@ function ChatsContent() {
       api(`/api/messages/${selected.id}?limit=200${topicParam}`).then((msgs: Message[]) => {
         const sorted = sortMsgs(msgs);
         setMessages((prev) => {
-          if (sorted.length !== prev.length || JSON.stringify(sorted.map(m => m.is_deleted)) !== JSON.stringify(prev.map(m => m.is_deleted))) return sorted;
+          if (sorted.length !== prev.length) return sorted;
+          // Fast check: compare last message id instead of JSON.stringify
+          if (sorted.length > 0 && prev.length > 0 && sorted[sorted.length-1].id !== prev[prev.length-1].id) return sorted;
           return prev;
         });
       }).catch(() => {});
-    }, 5000);  // 5s fallback — WS handles real-time updates
+    }, isWSConnected() ? 30000 : 5000);
     return () => clearInterval(interval);
   }, [selected, activeTopic]);
 

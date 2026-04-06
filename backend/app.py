@@ -404,6 +404,11 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_messages_contact_id ON messages (contact_id);
                 -- Composite index for contacts list query (most used query)
                 CREATE INDEX IF NOT EXISTS ix_contacts_account_archived_status ON contacts (tg_account_id, is_archived, status);
+                -- staff_tg_accounts FK indexes (eliminates 1.5M+ seq scans)
+                CREATE INDEX IF NOT EXISTS ix_staff_tg_accounts_staff ON staff_tg_accounts(staff_id);
+                CREATE INDEX IF NOT EXISTS ix_staff_tg_accounts_tg ON staff_tg_accounts(tg_account_id);
+                CREATE INDEX IF NOT EXISTS ix_scheduled_messages_status ON scheduled_messages(status) WHERE status = 'pending';
+                CREATE INDEX IF NOT EXISTS ix_staff_postforge_user ON staff(postforge_user_id);
                 CREATE INDEX IF NOT EXISTS ix_messages_media_missing ON messages (contact_id, media_type) WHERE media_type IS NOT NULL AND media_type != 'sticker';
                 -- Auto-approve all pending contacts (no approval flow)
                 UPDATE contacts SET status = 'approved' WHERE status = 'pending';
