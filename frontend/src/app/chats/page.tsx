@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, memo, useMemo, startTransition } from "react";
+import { useEffect, useRef, useState, useCallback, memo, useMemo } from "react";
 import {
   api,
   archiveContact,
@@ -672,6 +672,7 @@ function ChatsContent() {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const selectedRef = useRef<Contact | null>(null);
   const filterAccountRef = useRef<string | null>(null);
+  const contactsRef = useRef<Contact[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -688,6 +689,9 @@ function ChatsContent() {
   }, []);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { filterAccountRef.current = filterAccountId; }, [filterAccountId]);
+  // Keep latest contacts in ref so WS handler can lookup contact alias for notifications
+  // without doing nested setState (which is an anti-pattern)
+  useEffect(() => { contactsRef.current = contacts; }, [contacts]);
 
   // Fetch TG accounts for switcher — default to first account if none selected
   useEffect(() => {
@@ -724,17 +728,24 @@ function ChatsContent() {
     fetchTemplates(acctId).then(setTemplates).catch(console.error);
   }, [filterAccountId]);
 
-  // Save draft on page unload
+  // Save draft on page unload — use refs to avoid stale closures and ensure cleanup
+  const selectedForSaveRef = useRef<Contact | null>(null);
+  useEffect(() => { selectedForSaveRef.current = selected; }, [selected]);
   useEffect(() => {
     const save = () => {
-      if (selected && textRef.current.trim()) {
-        saveDraft(selected.id, textRef.current);
+      const sel = selectedForSaveRef.current;
+      if (sel && textRef.current.trim()) {
+        saveDraft(sel.id, textRef.current);
       }
     };
+    const onVis = () => { if (document.hidden) save(); };
     window.addEventListener("beforeunload", save);
-    document.addEventListener("visibilitychange", () => { if (document.hidden) save(); });
-    return () => window.removeEventListener("beforeunload", save);
-  }, [selected]);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("beforeunload", save);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   // Drafts are initialized from localStorage in useState above
 
@@ -753,8 +764,10 @@ function ChatsContent() {
     connectWS();
 
     const unsub = onWSEvent((event) => {
-      // Batch WS state updates to avoid multiple re-renders per event
-      startTransition(() => {
+      // NOTE: Don't wrap in startTransition — it defers critical updates
+      // (notifications, contact reordering, unread counts) which made them
+      // appear delayed or not at all. Memo'd ContactItem/MessageBubble +
+      // virtualized list keep re-render cost low without needing transitions.
       if (event.type === "new_message") {
         const isCurrentChat = selectedRef.current?.id === event.contact_id;
         setContacts((prev) => {
@@ -785,15 +798,14 @@ function ChatsContent() {
             next.set(event.contact_id, (next.get(event.contact_id) || 0) + 1);
             return next;
           });
-          // Find contact alias for notification
-          setContacts((prev) => {
-            const contact = prev.find((c) => c.id === event.contact_id);
-            if (contact && event.message?.content) {
+          // Show notification toast — read alias from contactsRef (no nested setState)
+          if (event.message?.content) {
+            const contact = contactsRef.current.find((c) => c.id === event.contact_id);
+            if (contact) {
               setNotification({ alias: contact.alias, text: event.message.content.slice(0, 80) });
-              setTimeout(() => setNotification(null), 3000);
+              setTimeout(() => setNotification(null), 4000);
             }
-            return prev;
-          });
+          }
         }
       }
       if (event.type === "message_edited") {
@@ -822,7 +834,6 @@ function ChatsContent() {
       if (event.type === "contact_deleted") {
         setContacts((prev) => prev.filter((c) => c.id !== event.contact_id));
       }
-      }); // end startTransition
     });
 
     return unsub;
