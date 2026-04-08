@@ -520,9 +520,16 @@ async def tg_auth(req: TgAuthRequest, request: Request, db: DB):
     if not tg_id:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No user ID in initData")
 
-    # 1. Find staff by exact tg_user_id (legacy non-SSO staff)
+    # 1. Find staff by exact tg_user_id (legacy non-SSO staff only).
+    # We require postforge_user_id IS NULL to prevent collisions: SSO-created staff use a
+    # synthetic 18-digit hash for tg_user_id, which can theoretically (though rarely) match a
+    # real Telegram user ID. Filtering legacy staff this way guarantees a real-tg-id match.
     result = await db.execute(
-        select(Staff).where(Staff.tg_user_id == tg_id, Staff.is_active.is_(True))
+        select(Staff).where(
+            Staff.tg_user_id == tg_id,
+            Staff.is_active.is_(True),
+            Staff.postforge_user_id.is_(None),
+        )
     )
     legacy_user = result.scalar_one_or_none()
 
@@ -554,29 +561,51 @@ async def tg_auth(req: TgAuthRequest, request: Request, db: DB):
                 pf_nickname = pf_data.get("nickname") or tg_user.get("first_name", "User")
                 pf_orgs = pf_data.get("organizations", [])
 
-                # Build list of org_ids to link: personal + each org
-                org_contexts = [f"personal_{pf_user_id}"]
-                for org in pf_orgs:
-                    org_contexts.append(str(org["id"]))
+                # Build list of org_ids to link.
+                # If user has team org(s), use ONLY those — do NOT auto-create a personal
+                # workspace alongside teams. Personal is created only for solo users (no team).
+                # This avoids the bug where a deactivated personal Staff (left over from a
+                # personal→team migration) gets silently re-created on every TG login, ending
+                # up as a duplicate workspace the user can pick by mistake.
+                if pf_orgs:
+                    org_contexts = [str(org["id"]) for org in pf_orgs]
+                else:
+                    org_contexts = [f"personal_{pf_user_id}"]
 
-                # For each context: find existing staff or create new
+                # For each context: find existing staff or create new.
+                # IMPORTANT: only consider active staff. Deactivated rows are intentional
+                # (e.g. personal-was-migrated-to-team) and must NOT be silently revived.
                 for org_id in org_contexts:
                     is_personal = org_id.startswith("personal_")
                     result = await db.execute(
                         select(Staff).where(
                             Staff.postforge_user_id == pf_user_id,
                             Staff.postforge_org_id == org_id,
+                            Staff.is_active.is_(True),
                         )
                     )
                     existing = result.scalar_one_or_none()
 
                     if existing:
-                        # Just set real_tg_id and activate
+                        # Link real_tg_id to this active staff
                         existing.real_tg_id = tg_id
-                        if not existing.is_active:
-                            existing.is_active = True
                         all_staff.append(existing)
                     else:
+                        # No active staff for this (user, org). Check if there is a
+                        # DEACTIVATED row — if so, leave it deactivated and skip creating
+                        # a new one (the deactivation was intentional, e.g. personal→team
+                        # migration). The unique (postforge_user_id, postforge_org_id) key
+                        # also makes a fresh INSERT here impossible.
+                        deact_result = await db.execute(
+                            select(Staff).where(
+                                Staff.postforge_user_id == pf_user_id,
+                                Staff.postforge_org_id == org_id,
+                                Staff.is_active.is_(False),
+                            )
+                        )
+                        if deact_result.scalar_one_or_none() is not None:
+                            print(f"[TG_AUTH] Skipping deactivated staff for pf_user={pf_user_id} org={org_id}", flush=True)
+                            continue
                         # Determine role
                         if is_personal:
                             crm_role = "super_admin"
@@ -664,7 +693,10 @@ async def tg_auth_select(req: TgWorkspaceSelect, db: DB):
     if not tg_id:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No user ID")
 
-    # Find staff matching this TG user + selected org
+    # Find staff matching this TG user + selected org.
+    # We match by real_tg_id (the verified Telegram ID from initData) AND postforge_org_id.
+    # The legacy tg_user_id fallback was removed: SSO-created staff use a synthetic 18-digit
+    # tg_user_id and a stray collision could let a user log into the wrong workspace.
     result = await db.execute(
         select(Staff).where(
             Staff.real_tg_id == tg_id,
@@ -674,13 +706,15 @@ async def tg_auth_select(req: TgWorkspaceSelect, db: DB):
     )
     user = result.scalar_one_or_none()
 
-    # Also try legacy tg_user_id match
+    # Legacy non-SSO staff (postforge_user_id IS NULL) — match by tg_user_id but ONLY if no
+    # SSO link exists, to avoid the synthetic-id collision.
     if not user:
         result = await db.execute(
             select(Staff).where(
                 Staff.tg_user_id == tg_id,
                 Staff.postforge_org_id == req.org_id,
                 Staff.is_active.is_(True),
+                Staff.postforge_user_id.is_(None),
             )
         )
         user = result.scalar_one_or_none()
@@ -3061,6 +3095,23 @@ async def _run_broadcast(broadcast_id: UUID):
             .where(BroadcastRecipient.broadcast_id == broadcast_id, BroadcastRecipient.status == "pending")
         )
         recipients = result.scalars().all()
+
+        # Warm up Telethon entity cache by iterating dialogs once.
+        # Without this, send_message(user_id) fails with "Could not find the input entity for
+        # PeerUser(...)" when the user is in the contacts table but their access_hash is not in
+        # the current SQLite session (happens after re-login or when the contact was added via
+        # a different code path). iter_dialogs() forces Telethon to fetch and cache access_hash
+        # for every dialog the account currently has.
+        from telegram import _clients as _tg_clients
+        _client = _tg_clients.get(bc.tg_account_id)
+        if _client:
+            try:
+                _warmed = 0
+                async for _ in _client.iter_dialogs(limit=None):
+                    _warmed += 1
+                print(f"[BROADCAST {broadcast_id}] Warmed entity cache: {_warmed} dialogs", flush=True)
+            except Exception as _warm_err:
+                print(f"[BROADCAST {broadcast_id}] Warm-up failed: {_warm_err}", flush=True)
 
         for recip in recipients:
             # Check if paused/cancelled
