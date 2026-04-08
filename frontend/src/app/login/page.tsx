@@ -5,8 +5,64 @@ import { useRouter } from "next/navigation";
 import {
   isTelegramWebApp, tgAuth, tgSelectWorkspace, ssoAuth,
   getTgWebApp, getTokens, saveTokens, clearTokens, disconnectWS,
+  api,
   type TgWorkspace,
 } from "@/lib";
+
+/**
+ * Decode a JWT payload without verification (signature is checked server-side).
+ * Returns the parsed object or null if the token is malformed. The server still
+ * authoritatively validates everything — this is purely so the login page can
+ * tell whether a locally-stored token belongs to the currently-logged-in
+ * PostForge user before silently accepting it.
+ */
+function decodeJwtPayload(token: string): Record<string, any> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payload + "===".slice((payload.length + 3) % 4);
+    return JSON.parse(decodeURIComponent(escape(atob(padded))));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Owner-check: confirms that the locally-stored CRM token belongs to the
+ * currently-logged-in PostForge user. If the user shares a browser/profile
+ * with a teammate, the previous flow happily reused whichever CRM token was
+ * sitting in localStorage — the user ended up impersonating their teammate
+ * and seeing the wrong contacts. This is the guard against that.
+ *
+ * Returns true if the token is OK to use as-is, false if it must be cleared
+ * and re-issued via SSO.
+ */
+async function isLocalCrmTokenOwnedByCurrentPfUser(): Promise<boolean | null> {
+  const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+  if (!pfToken) {
+    // No PostForge token in shared storage — we have no source of truth to
+    // compare against, so we can't say either way. Caller will decide.
+    return null;
+  }
+  const pfPayload = decodeJwtPayload(pfToken);
+  const pfUserId = pfPayload?.sub ? String(pfPayload.sub) : null;
+  if (!pfUserId) return null;
+
+  let staff: any;
+  try {
+    staff = await api("/api/staff/me");
+  } catch {
+    // 401/network error → token is bad anyway, force re-SSO
+    return false;
+  }
+  const staffPfUserId = staff?.postforge_user_id ? String(staff.postforge_user_id) : null;
+  // Backend hasn't been redeployed yet (older response without postforge_user_id)
+  // — fall through to "unknown" so we don't lock everyone out during a partial
+  // rollout. Once both sides ship, this becomes a hard equality check.
+  if (!staffPfUserId) return null;
+  return staffPfUserId === pfUserId;
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -15,83 +71,115 @@ export default function LoginPage() {
   const [selecting, setSelecting] = useState(false);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    let cancelled = false;
+    let messageHandler: ((e: MessageEvent) => void) | null = null;
 
-    // Pre-authenticated tokens from hash fragment or query params
-    const hashParams = window.location.hash ? new URLSearchParams(window.location.hash.substring(1)) : null;
-    const accessToken = hashParams?.get("access_token") || params.get("access_token");
-    const refreshToken = hashParams?.get("refresh_token") || params.get("refresh_token");
-    if (accessToken && refreshToken) {
-      // Clear old session completely before applying new SSO tokens
-      disconnectWS();
-      clearTokens();
-      const role = hashParams?.get("role") || params.get("role") || "operator";
-      saveTokens({ access_token: accessToken, refresh_token: refreshToken, role });
-      // Mark as coming from PostForge so AppShell shows "back to dashboard" instead of "logout"
-      try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {}
-      const base = window.location.pathname.split("/login")[0] || "";
-      window.location.href = base + "/chats/";
-      return;
-    }
+    const run = async () => {
+      const params = new URLSearchParams(window.location.search);
 
-    // Already authenticated — but if direct navigation (not iframe), re-SSO to sync workspace
-    const isInIframe = window.self !== window.top;
-    if (getTokens()?.access_token) {
-      if (!isInIframe) {
-        // Direct access: PostForge user may have changed — re-SSO using PostForge token
-        const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
-        if (pfToken) {
+      // Pre-authenticated tokens from hash fragment or query params
+      const hashParams = window.location.hash ? new URLSearchParams(window.location.hash.substring(1)) : null;
+      const accessToken = hashParams?.get("access_token") || params.get("access_token");
+      const refreshToken = hashParams?.get("refresh_token") || params.get("refresh_token");
+      if (accessToken && refreshToken) {
+        // Clear old session completely before applying new SSO tokens
+        disconnectWS();
+        clearTokens();
+        const role = hashParams?.get("role") || params.get("role") || "operator";
+        saveTokens({ access_token: accessToken, refresh_token: refreshToken, role });
+        // Mark as coming from PostForge so AppShell shows "back to dashboard" instead of "logout"
+        try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {}
+        const base = window.location.pathname.split("/login")[0] || "";
+        window.location.href = base + "/chats/";
+        return;
+      }
+
+      // Already authenticated — but if direct navigation (not iframe), re-SSO to sync workspace
+      const isInIframe = window.self !== window.top;
+      if (getTokens()?.access_token) {
+        // OWNER CHECK: if a PostForge token is in shared localStorage, the locally-stored
+        // CRM token MUST belong to the same user. Otherwise we have a stale token from a
+        // different teammate (shared browser/profile) and we'd silently impersonate them.
+        // This was the root cause of the "Maxim sees other operators' chats" incident.
+        const ownership = await isLocalCrmTokenOwnedByCurrentPfUser();
+        if (cancelled) return;
+        if (ownership === false) {
+          // Stale token detected — clear and re-SSO with the current PostForge token
+          const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
           clearTokens();
           disconnectWS();
-          ssoAuth(pfToken).then((ok) => {
+          if (pfToken) {
+            const ok = await ssoAuth(pfToken);
+            if (cancelled) return;
             if (ok) {
               const base = window.location.pathname.split("/login")[0] || "";
               window.location.href = base + "/chats/";
             } else {
               setStatus("error");
             }
-          });
+          } else {
+            setStatus("error");
+          }
           return;
         }
-      }
-      const base = window.location.pathname.split("/chats")[0]?.split("/login")[0]?.split("/settings")[0] || "";
-      window.location.href = base + "/chats/";
-      return;
-    }
+        // ownership === true (verified) OR null (no PF token in storage / older backend) — proceed.
 
-    // SSO token (standalone window open from PostForge)
-    const ssoToken = params.get("sso_token");
-    if (ssoToken) {
-      ssoAuth(ssoToken).then((ok) => {
+        if (!isInIframe) {
+          // Direct access: PostForge user may have changed — re-SSO using PostForge token
+          const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+          if (pfToken) {
+            clearTokens();
+            disconnectWS();
+            const ok = await ssoAuth(pfToken);
+            if (cancelled) return;
+            if (ok) {
+              const base = window.location.pathname.split("/login")[0] || "";
+              window.location.href = base + "/chats/";
+            } else {
+              setStatus("error");
+            }
+            return;
+          }
+        }
+        const base = window.location.pathname.split("/chats")[0]?.split("/login")[0]?.split("/settings")[0] || "";
+        window.location.href = base + "/chats/";
+        return;
+      }
+
+      // SSO token (standalone window open from PostForge)
+      const ssoToken = params.get("sso_token");
+      if (ssoToken) {
+        const ok = await ssoAuth(ssoToken);
+        if (cancelled) return;
         if (ok) router.replace("/chats");
         else setStatus("error");
-      });
-      return;
-    }
-
-    // SSO: listen for PostForge token via postMessage (when embedded in iframe)
-    function handleSsoMessage(event: MessageEvent) {
-      const allowedOrigins = [window.location.origin, "https://metra-ai.org", "https://app.metra-ai.org"];
-      if (!allowedOrigins.includes(event.origin)) return;
-      if (event.data?.type === "postforge_sso" && event.data?.token) {
-        ssoAuth(event.data.token).then((ok) => {
-          if (ok) router.replace("/chats");
-          else setStatus("error");
-        });
+        return;
       }
-    }
-    window.addEventListener("message", handleSsoMessage);
 
-    // Telegram Mini App auth
-    if (isTelegramWebApp()) {
-      getTgWebApp()?.ready();
-      getTgWebApp()?.expand();
-      const forceSwitch = params.get("switch") === "1";
-      tgAuth(forceSwitch).then((result) => {
+      // SSO: listen for PostForge token via postMessage (when embedded in iframe)
+      messageHandler = (event: MessageEvent) => {
+        const allowedOrigins = [window.location.origin, "https://metra-ai.org", "https://app.metra-ai.org"];
+        if (!allowedOrigins.includes(event.origin)) return;
+        if (event.data?.type === "postforge_sso" && event.data?.token) {
+          ssoAuth(event.data.token).then((ok) => {
+            if (cancelled) return;
+            if (ok) router.replace("/chats");
+            else setStatus("error");
+          });
+        }
+      };
+      window.addEventListener("message", messageHandler);
+
+      // Telegram Mini App auth
+      if (isTelegramWebApp()) {
+        getTgWebApp()?.ready();
+        getTgWebApp()?.expand();
+        const forceSwitch = params.get("switch") === "1";
+        const result = await tgAuth(forceSwitch);
+        if (cancelled) return;
         if (result.ok && !forceSwitch) {
           router.replace("/chats");
         } else if (result.workspaces || forceSwitch) {
-          // Force workspace picker when switching
           if (result.workspaces) {
             setWorkspaces(result.workspaces);
           }
@@ -99,31 +187,37 @@ export default function LoginPage() {
         } else {
           setStatus("error");
         }
-      });
-    } else {
-      const isInIframe = window.self !== window.top;
-      if (isInIframe) {
-        // In iframe — request SSO token from parent (PostForge)
-        window.parent?.postMessage({ type: "crm_ready" }, window.location.origin);
       } else {
-        // Direct navigation (not iframe) — use PostForge token from shared localStorage
-        const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
-        if (pfToken) {
-          ssoAuth(pfToken).then((ok) => {
+        const inIframe = window.self !== window.top;
+        if (inIframe) {
+          // In iframe — request SSO token from parent (PostForge)
+          window.parent?.postMessage({ type: "crm_ready" }, window.location.origin);
+        } else {
+          // Direct navigation (not iframe) — use PostForge token from shared localStorage
+          const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+          if (pfToken) {
+            const ok = await ssoAuth(pfToken);
+            if (cancelled) return;
             if (ok) {
               const base = window.location.pathname.split("/login")[0] || "";
               window.location.href = base + "/chats/";
             } else {
               setStatus("error");
             }
-          });
-        } else {
-          setStatus("error");
+          } else {
+            setStatus("error");
+          }
         }
       }
-    }
 
-    return () => window.removeEventListener("message", handleSsoMessage);
+    };
+
+    run();
+
+    return () => {
+      cancelled = true;
+      if (messageHandler) window.removeEventListener("message", messageHandler);
+    };
   }, [router]);
 
   const handleSelectWorkspace = async (orgId: string) => {

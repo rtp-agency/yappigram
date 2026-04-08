@@ -50,6 +50,10 @@ class StaffOut(BaseModel):
     signature_mode: str = "named"
     timezone: str | None = "UTC"
     postforge_org_id: str | None = None
+    # Surfaced so the frontend can detect cross-user token reuse: if the local
+    # CRM token's postforge_user_id doesn't match the PostForge access_token's
+    # user.id, the login page must clear and re-SSO.
+    postforge_user_id: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
