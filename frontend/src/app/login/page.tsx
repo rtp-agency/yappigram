@@ -136,10 +136,9 @@ export default function LoginPage() {
         if (!isInIframe) {
           // Direct access (crm.metra-ai.org): user already has a valid CRM token
           // (ownership check passed above). Just redirect to /chats.
-          // We do NOT force re-SSO here because:
-          //   1) The PostForge token in localStorage is from the CRM domain, not PostForge
-          //   2) Forcing re-SSO with a stale/wrong-domain token causes "auth failed"
-          //   3) The ownership check already verified the CRM token belongs to the right user
+          // Clear crm_selected_account to avoid loading a stale TG account from
+          // a previous session/user. The chats page will re-validate from fetchTgStatus.
+          try { sessionStorage.removeItem("crm_selected_account"); } catch {}
           const base = window.location.pathname.split("/login")[0] || "";
           window.location.href = base + "/chats/";
           return;
