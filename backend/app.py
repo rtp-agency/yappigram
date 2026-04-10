@@ -218,6 +218,57 @@ _rate_limits: dict[str, list[float]] = defaultdict(list)
 RATE_LIMIT_WINDOW = 60  # seconds
 RATE_LIMIT_MAX = 30  # per real IP per minute
 
+# --- Telethon flood protection ---
+# Telegram MTProto limits (empirical, not officially documented):
+#   - ~1 message per second to the same peer
+#   - ~20 messages per second across all peers per account
+#   - sustained spam → FLOOD_WAIT X seconds → temporary ban
+# We stay well below these to avoid flood_wait errors and TG account bans.
+#
+# Strategy: sliding window per (tg_account_id, peer_id) AND per tg_account_id.
+#   - Per-peer: max 4 messages per 10 seconds (2x margin below TG's 1/sec)
+#   - Per-account: max 60 messages per 60 seconds (3x margin below 20/sec burst)
+_tg_send_limits_peer: dict[tuple, list[float]] = defaultdict(list)
+_tg_send_limits_account: dict[str, list[float]] = defaultdict(list)
+TG_PEER_WINDOW = 10  # seconds
+TG_PEER_MAX = 4      # messages per peer per window
+TG_ACCT_WINDOW = 60  # seconds
+TG_ACCT_MAX = 60     # messages per account per window
+
+
+def check_tg_send_limit(tg_account_id: str, peer_id: int) -> None:
+    """
+    Throttle outgoing messages to prevent Telegram flood bans.
+
+    Raises 429 Too Many Requests if the caller is sending faster than
+    our safe-zone limits. Users should see this as "Подождите пару
+    секунд" in the UI rather than as a TG account ban.
+    """
+    now = time.time()
+    acct_key = str(tg_account_id)
+    peer_key = (str(tg_account_id), peer_id)
+
+    # Per-peer window
+    peer_hits = _tg_send_limits_peer[peer_key]
+    peer_hits[:] = [t for t in peer_hits if now - t < TG_PEER_WINDOW]
+    if len(peer_hits) >= TG_PEER_MAX:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Слишком много сообщений этому контакту. Подождите {TG_PEER_WINDOW} сек.",
+        )
+
+    # Per-account window
+    acct_hits = _tg_send_limits_account[acct_key]
+    acct_hits[:] = [t for t in acct_hits if now - t < TG_ACCT_WINDOW]
+    if len(acct_hits) >= TG_ACCT_MAX:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Аккаунт отправил слишком много сообщений. Подождите {TG_ACCT_WINDOW} сек чтобы избежать бана Telegram.",
+        )
+
+    peer_hits.append(now)
+    acct_hits.append(now)
+
 
 def _get_real_ip(request) -> str:
     """Get real client IP from proxy headers."""
@@ -1882,6 +1933,8 @@ async def send_msg(contact_id: UUID, req: SendMessage, user: CurrentUser, db: DB
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
+    check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
+
     # Resolve reply-to. Filter by contact_id so a user can't reference a
     # message from a different contact (or from another tenant entirely).
     # Without this filter, sending POST /api/messages/{contact_id}/send
@@ -2050,6 +2103,7 @@ async def send_media(
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
+    check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
     _validate_upload(file)
 
     # Determine media type from content type
@@ -2113,6 +2167,8 @@ async def send_template_media(contact_id: UUID, user: CurrentUser, db: DB, templ
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
+    check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
+
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id))
     tpl = result.scalar_one_or_none()
     if not tpl:
@@ -2155,6 +2211,7 @@ async def send_template_single_block(
     contact = await _get_contact_with_access(contact_id, user, db)
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
+    check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id))
     tpl = result.scalar_one_or_none()
     if not tpl or not tpl.blocks_json:
@@ -2252,6 +2309,11 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
     contact = await _get_contact_with_access(contact_id, user, db)
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
+
+    # Pre-check: block sends bulk templates that would exceed the flood limit.
+    # We don't call check_tg_send_limit inside the loop because it would
+    # reject mid-send and leave a partial template delivery.
+    check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
 
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id))
     tpl = result.scalar_one_or_none()
@@ -2405,6 +2467,8 @@ async def forward_msg(contact_id: UUID, req: ForwardMessage, user: CurrentUser, 
 
     if target.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Target contact not approved")
+
+    check_tg_send_limit(str(target.tg_account_id), target.real_tg_id)
 
     # Batch-load source messages (avoid N+1 queries)
     result = await db.execute(
