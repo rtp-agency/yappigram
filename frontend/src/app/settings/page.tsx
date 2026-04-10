@@ -96,19 +96,24 @@ function WorkspaceSection() {
 
 function TelegramSection() {
   const [accounts, setAccounts] = useState<any[]>([]);
+  const [billingInfo, setBillingInfo] = useState<any>(null);
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [password2fa, setPassword2fa] = useState("");
   const [step, setStep] = useState<"idle" | "code_sent">("idle");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const loadData = () => {
     api("/api/tg/status").then((res: any) => {
-      // Support both old format (array) and new format ({ accounts: [...] })
       const accs = Array.isArray(res) ? res : (res.accounts || []);
       setAccounts(accs.filter((a: any) => a.is_active));
     }).catch(console.error);
-  }, []);
+    api("/api/tg/billing").then((res: any) => {
+      setBillingInfo(res);
+    }).catch(console.error);
+  };
+
+  useEffect(() => { loadData(); }, []);
 
   const connect = async () => {
     setLoading(true);
@@ -150,40 +155,75 @@ function TelegramSection() {
         Telegram аккаунты
       </h2>
 
-      {accounts.map((acc) => (
-        <div key={acc.id} className="bg-gradient-to-r from-surface-card to-surface border border-surface-border rounded-xl p-4 mb-2">
-          <div className="flex items-center gap-3">
-            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${acc.is_active ? "bg-emerald-400" : "bg-red-400"}`} />
-            <span className="font-medium text-sm">{acc.display_name || acc.phone}</span>
-            <span className={`text-xs ${acc.is_active ? "text-emerald-400/70" : "text-red-400/70"}`}>
-              {acc.is_active ? "Активен" : "Отключён"}
-            </span>
-          </div>
-          {acc.is_active && (
-            <div className="flex gap-2 mt-3 flex-wrap">
-              {confirmDisconnect === acc.id ? (
-                <div className="flex gap-1">
-                  <Button variant="danger" onClick={() => disconnect(acc.id)}>Да, отключить</Button>
-                  <Button variant="ghost" onClick={() => setConfirmDisconnect(null)}>Отмена</Button>
-                </div>
-              ) : (
-                <Button variant="danger" onClick={() => setConfirmDisconnect(acc.id)}>Отключить</Button>
-              )}
+      {accounts.map((acc) => {
+        // Find billing record for this account
+        const billing = billingInfo?.accounts?.find(
+          (b: any) => b.crm_account_id === acc.id || b.phone_number === acc.phone
+        );
+        return (
+          <div key={acc.id} className="bg-gradient-to-r from-surface-card to-surface border border-surface-border rounded-xl p-4 mb-2">
+            <div className="flex items-center gap-3">
+              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${acc.is_active ? "bg-emerald-400" : "bg-red-400"}`} />
+              <span className="font-medium text-sm">{acc.display_name || acc.phone}</span>
+              <span className={`text-xs ${acc.is_active ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                {acc.is_active ? "Активен" : "Отключён"}
+              </span>
             </div>
-          )}
-        </div>
-      ))}
+            {/* Billing info */}
+            {billing && (
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-text-muted">
+                {billing.connected_at && (
+                  <span>Подключён: {new Date(billing.connected_at).toLocaleDateString("ru-RU")}</span>
+                )}
+                {billing.next_charge_at && (
+                  <span>Следующая оплата: {new Date(billing.next_charge_at).toLocaleDateString("ru-RU")}</span>
+                )}
+                <span>{billingInfo?.cost_per_month || "45"} коинов/мес</span>
+              </div>
+            )}
+            {acc.is_active && (
+              <div className="flex gap-2 mt-3 flex-wrap">
+                {confirmDisconnect === acc.id ? (
+                  <div className="flex gap-1">
+                    <Button variant="danger" onClick={() => disconnect(acc.id)}>Да, отключить</Button>
+                    <Button variant="ghost" onClick={() => setConfirmDisconnect(null)}>Отмена</Button>
+                  </div>
+                ) : (
+                  <Button variant="danger" onClick={() => setConfirmDisconnect(acc.id)}>Отключить</Button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
 
       <div className="mt-4 bg-gradient-to-br from-surface-card to-surface border border-surface-border rounded-2xl p-5 space-y-3">
         {step === "idle" ? (
           <>
+            {/* Billing cost notice */}
+            <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20 text-xs text-amber-200/80">
+              <p className="font-medium mb-1">Стоимость: {billingInfo?.cost_per_month || "45"} Metra Coins / месяц</p>
+              <p className="text-amber-200/60">
+                {billingInfo?.billing_enabled
+                  ? `Ваш баланс: ${billingInfo?.balance || "0"} коинов`
+                  : "Бесплатный период — списания начнутся позже"
+                }
+              </p>
+            </div>
             <Input label="Номер телефона" value={phone} onChange={(v) => {
               // Auto-format: strip non-digits, ensure + prefix
               const digits = v.replace(/[^\d+]/g, "");
               setPhone(digits.startsWith("+") ? digits : "+" + digits);
             }} placeholder="+79001234567" />
-            <Button onClick={connect} disabled={loading || !phone}>
-              {loading ? "Отправка кода..." : "Подключить аккаунт"}
+            <Button
+              onClick={connect}
+              disabled={loading || !phone || (billingInfo?.billing_enabled && !billingInfo?.can_afford_new)}
+            >
+              {loading ? "Отправка кода..." :
+                billingInfo?.billing_enabled && !billingInfo?.can_afford_new
+                  ? "Недостаточно средств"
+                  : "Подключить аккаунт"
+              }
             </Button>
           </>
         ) : (

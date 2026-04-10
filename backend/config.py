@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # public hostname.
     POSTFORGE_API_URL: str = ""  # e.g. http://backend:8000 (internal) or https://metra-ai.org
     POSTFORGE_BOT_TOKEN: str = ""  # PostForge bot token (for Mini App initData validation)
+    POSTFORGE_BOT_SECRET: str = ""  # Shared secret for calling PostForge internal APIs (Bot {secret} header)
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

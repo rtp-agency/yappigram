@@ -129,6 +129,88 @@ from ws import ws_manager
 MEDIA_DIR = "media"
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
+
+# ─── PostForge CRM billing helpers ────────────────────────────────
+# Called from connect/verify/disconnect endpoints to sync billing
+# state with PostForge's coin balance system.
+
+async def _postforge_crm_billing_check(user) -> dict | None:
+    """Check if user can afford to connect a new CRM TG account."""
+    if not settings.POSTFORGE_API_URL or not settings.POSTFORGE_BOT_SECRET:
+        return None  # Billing not configured — allow connect
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{settings.POSTFORGE_API_URL}/api/internal/crm-billing/check",
+                json={"postforge_user_id": user.postforge_user_id},
+                headers={"Authorization": f"Bot {settings.POSTFORGE_BOT_SECRET}"},
+            )
+        if resp.status_code == 200:
+            return resp.json()
+        return None  # Non-200 → allow connect (don't block on billing issues)
+    except Exception:
+        return None
+
+
+async def _postforge_crm_billing_charge(user, crm_account_id: str, phone_number: str) -> dict | None:
+    """Charge the user for first month of a CRM TG account."""
+    if not settings.POSTFORGE_API_URL or not settings.POSTFORGE_BOT_SECRET:
+        return None
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{settings.POSTFORGE_API_URL}/api/internal/crm-billing/charge",
+                json={
+                    "postforge_user_id": user.postforge_user_id,
+                    "crm_account_id": crm_account_id,
+                    "phone_number": phone_number,
+                },
+                headers={"Authorization": f"Bot {settings.POSTFORGE_BOT_SECRET}"},
+            )
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception:
+        return None
+
+
+async def _postforge_crm_billing_disconnect(crm_account_id: str) -> None:
+    """Notify PostForge that this CRM account is disconnected."""
+    if not settings.POSTFORGE_API_URL or not settings.POSTFORGE_BOT_SECRET:
+        return
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{settings.POSTFORGE_API_URL}/api/internal/crm-billing/disconnect",
+                json={"crm_account_id": crm_account_id},
+                headers={"Authorization": f"Bot {settings.POSTFORGE_BOT_SECRET}"},
+            )
+    except Exception:
+        pass
+
+
+async def _postforge_crm_billing_accounts(user) -> list:
+    """Get billing info for all user's CRM accounts from PostForge."""
+    if not settings.POSTFORGE_API_URL or not settings.POSTFORGE_BOT_SECRET:
+        return []
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{settings.POSTFORGE_API_URL}/api/internal/crm-billing/accounts",
+                params={"postforge_user_id": user.postforge_user_id},
+                headers={"Authorization": f"Bot {settings.POSTFORGE_BOT_SECRET}"},
+            )
+        if resp.status_code == 200:
+            return resp.json().get("accounts", [])
+        return []
+    except Exception:
+        return []
+
+
 # --- Rate limiting for auth endpoints ---
 _rate_limits: dict[str, list[float]] = defaultdict(list)
 RATE_LIMIT_WINDOW = 60  # seconds
@@ -900,9 +982,26 @@ async def tg_connect(req: TgConnectRequest, request: Request, user: AdminUser, d
     )
     if count.scalar() >= MAX_TG_ACCOUNTS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Максимум {MAX_TG_ACCOUNTS} аккаунтов")
+
+    # Check if user can afford the monthly CRM fee before connecting
+    billing_check = await _postforge_crm_billing_check(user)
+    if billing_check and not billing_check.get("can_afford"):
+        cost = billing_check.get("cost", "45")
+        balance = billing_check.get("balance", "0")
+        raise HTTPException(
+            status.HTTP_402_PAYMENT_REQUIRED,
+            f"Недостаточно средств на балансе ({balance} коинов). "
+            f"Стоимость подключения номера: {cost} коинов/месяц. "
+            f"Пополните баланс в разделе Баланс."
+        )
+
     try:
         result = await start_connect(req.phone)
-        return {"status": "code_sent", "debug": result}
+        return {
+            "status": "code_sent",
+            "debug": result,
+            "billing": billing_check,
+        }
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Ошибка подключения: {str(e)[:200]}")
 
@@ -924,6 +1023,21 @@ async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
     if tg_acc:
         tg_acc.org_id = _org_id(user)
         await db.commit()
+
+    # Charge the user for the CRM account (45 coins first month).
+    # Non-blocking: if PostForge is unreachable or billing_enabled=0,
+    # the account connects anyway — billing catches up on the next
+    # monthly tick or when the user tops up.
+    try:
+        await _postforge_crm_billing_charge(
+            user,
+            crm_account_id=str(account.id),
+            phone_number=account.phone,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"CRM billing charge failed (non-blocking): {e}")
+
     # Auto-sync ALL dialogs in background after connecting
     asyncio.create_task(_do_sync_dialogs(account.id, 500))
     return account
@@ -952,6 +1066,24 @@ async def tg_status(user: CurrentUser, db: DB):
     return out
 
 
+@app.get("/api/tg/billing")
+async def tg_billing_info(user: CurrentUser):
+    """
+    Billing info for all CRM TG accounts of this user. Returns per-account
+    data: connected_at, next_charge_at, cost per month. Used by the
+    frontend settings page to show billing details next to each number.
+    """
+    accounts = await _postforge_crm_billing_accounts(user)
+    billing_check = await _postforge_crm_billing_check(user)
+    return {
+        "accounts": accounts,
+        "cost_per_month": billing_check.get("cost", "45") if billing_check else "45",
+        "billing_enabled": billing_check.get("billing_enabled", False) if billing_check else False,
+        "can_afford_new": billing_check.get("can_afford", True) if billing_check else True,
+        "balance": billing_check.get("balance", "0") if billing_check else "0",
+    }
+
+
 @app.delete("/api/tg/disconnect/{account_id}")
 async def tg_disconnect(account_id: UUID, user: CurrentUser, db: DB):
     result = await db.execute(select(TgAccount).where(TgAccount.id == account_id, TgAccount.org_id == _org_id(user)))
@@ -971,6 +1103,14 @@ async def tg_disconnect(account_id: UUID, user: CurrentUser, db: DB):
         await disconnect_account(account_id)
     except Exception:
         pass  # Session may be expired — DB cleanup already done
+
+    # Notify PostForge to stop future billing for this account
+    try:
+        await _postforge_crm_billing_disconnect(str(account_id))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"CRM billing disconnect failed (non-blocking): {e}")
+
     return {"status": "disconnected"}
 
 
