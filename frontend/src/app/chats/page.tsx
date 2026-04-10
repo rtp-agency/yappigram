@@ -710,22 +710,32 @@ function ChatsContent() {
     }).catch(console.error);
   }, []);
 
-  // Account-aware data fetching
+  // Account-aware data fetching — consolidated into one effect with
+  // AbortController so switching accounts rapidly doesn't pile up stale
+  // requests that overwrite newer state (was causing UI freeze after 2-3
+  // switches).
   useEffect(() => {
     const acctId = filterAccountId || undefined;
+    const ctrl = new AbortController();
+    const sig = ctrl.signal;
+
+    // Fire all account-scoped fetches in parallel, but abort them all
+    // if filterAccountId changes before they complete.
+    const qp = acctId ? `?tg_account_id=${acctId}` : "";
+
     fetchUnread(acctId).then((data) => {
-      setUnread(new Map(Object.entries(data)));
-    }).catch(console.error);
-  }, [filterAccountId]);
+      if (!sig.aborted) setUnread(new Map(Object.entries(data)));
+    }).catch(() => {});
 
-  useEffect(() => {
-    const acctId = filterAccountId || undefined;
-    api(`/api/tags${acctId ? `?tg_account_id=${acctId}` : ""}`).then(setAllTags).catch(console.error);
-  }, [filterAccountId]);
+    api(`/api/tags${qp}`).then((tags) => {
+      if (!sig.aborted) setAllTags(tags);
+    }).catch(() => {});
 
-  useEffect(() => {
-    const acctId = filterAccountId || undefined;
-    fetchTemplates(acctId).then(setTemplates).catch(console.error);
+    fetchTemplates(acctId).then((tpls) => {
+      if (!sig.aborted) setTemplates(tpls);
+    }).catch(() => {});
+
+    return () => ctrl.abort();
   }, [filterAccountId]);
 
   // Save draft on page unload — use refs to avoid stale closures and ensure cleanup
@@ -749,15 +759,21 @@ function ChatsContent() {
 
   // Drafts are initialized from localStorage in useState above
 
-  // Re-fetch contacts when account filter changes (both normal + archived)
+  // Re-fetch contacts when account filter changes (both normal + archived).
+  // Guarded by AbortController to prevent stale state on rapid switches.
   useEffect(() => {
     const acctId = filterAccountId || undefined;
+    const ctrl = new AbortController();
+    const sig = ctrl.signal;
+
     Promise.all([
       fetchContacts(undefined, acctId, false),
       fetchContacts(undefined, acctId, true),
     ]).then(([normal, archived]) => {
-      setContacts([...normal, ...archived]);
-    }).catch(console.error);
+      if (!sig.aborted) setContacts([...normal, ...archived]);
+    }).catch(() => {});
+
+    return () => ctrl.abort();
   }, [filterAccountId]);
 
   useEffect(() => {

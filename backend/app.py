@@ -3590,6 +3590,12 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             if peer_id == 777000:
                 continue
 
+            # Skip archived dialogs — they should go to the archive
+            # folder, not the main chat list. Users can view archived
+            # chats separately via the "Архив" button.
+            if getattr(dialog, "archived", False):
+                continue
+
             # Update last_message_at for existing contacts from Telegram dialog date
             result = await db.execute(
                 select(Contact).where(Contact.tg_account_id == account_id, Contact.real_tg_id == peer_id)
