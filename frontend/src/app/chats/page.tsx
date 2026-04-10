@@ -693,20 +693,30 @@ function ChatsContent() {
   // without doing nested setState (which is an anti-pattern)
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
 
-  // Fetch TG accounts for switcher — default to first account if none selected
+  // Fetch TG accounts for switcher — validate stored account on every mount.
+  // If sessionStorage has a stale account ID (from a different CRM instance,
+  // previous session, or a reconnected account), the contacts fetch would
+  // filter by that ghost ID and return empty → "No chats found". Clear it
+  // aggressively to prevent this.
   useEffect(() => {
     fetchTgStatus().then((rawAccs) => {
-      const accs = rawAccs.filter((a) => a.is_active);
+      const accs = rawAccs.filter((a: any) => a.is_active);
       setAccountsList(accs);
-      if (accs.length >= 1) {
-        // If no account selected or selected account is not in active list — auto-select first
-        const currentValid = filterAccountId === null || (filterAccountId && accs.some((a) => a.id === filterAccountId));
-        if (!currentValid) {
-          const firstId = accs[0].id;
-          setFilterAccountId(firstId);
-          sessionStorage.setItem("crm_selected_account", firstId);
-        }
+      if (accs.length === 0) return;
+
+      const stored = sessionStorage.getItem("crm_selected_account");
+      const isValid = stored && accs.some((a: any) => a.id === stored);
+
+      if (accs.length === 1) {
+        // Single account — always select it, no ambiguity
+        setFilterAccountId(accs[0].id);
+        sessionStorage.setItem("crm_selected_account", accs[0].id);
+      } else if (!isValid) {
+        // Stored account doesn't exist in current active list — reset
+        setFilterAccountId(null);
+        sessionStorage.removeItem("crm_selected_account");
       }
+      // else: stored is valid, keep it
     }).catch(console.error);
   }, []);
 
