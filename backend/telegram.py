@@ -23,7 +23,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest, GetAllDraftsRequest
 
 from config import settings
-from crypto import encrypt
+from crypto import encrypt, encrypt_session, decrypt_session, is_session_encrypted
 
 
 def _compress_photo(filepath: str) -> str:
@@ -143,13 +143,15 @@ async def start_connect(phone: str) -> dict:
     import logging
     log = logging.getLogger("tg_connect")
     log.info(f"start_connect called for phone={phone}")
-    # Try to load existing session_string from DB
+    # Try to load existing session_string from DB. Sessions are
+    # encrypted at rest — decrypt_session transparently handles legacy
+    # plaintext rows so we don't break existing accounts mid-rollout.
     session = StringSession()
     async with async_session() as db:
         result = await db.execute(select(TgAccount).where(TgAccount.phone == phone))
         existing = result.scalar_one_or_none()
         if existing and existing.session_string:
-            session = StringSession(existing.session_string)
+            session = StringSession(decrypt_session(existing.session_string))
             print(f"[TG_CONNECT] Loaded StringSession from DB for {phone}", flush=True)
 
     for attempt in range(2):
@@ -206,23 +208,26 @@ async def verify_code(phone: str, code: str, password_2fa: str | None = None) ->
         parts = [getattr(me, "first_name", "") or "", getattr(me, "last_name", "") or ""]
         display_name = " ".join(p for p in parts if p).strip() or getattr(me, "username", None) or None
 
-    # Save StringSession to DB (no more SQLite files)
+    # Save StringSession to DB. Always Fernet-encrypt before storing —
+    # plaintext sessions in DB == full Telegram account takeover on a
+    # DB breach. encrypt_session() returns a `gAAAA...` Fernet token.
     session_str = client.session.save()
     if not session_str or len(session_str) < 10:
         raise ValueError("Failed to serialize Telegram session")
+    encrypted_session = encrypt_session(session_str)
     async with async_session() as db:
         result = await db.execute(select(TgAccount).where(TgAccount.phone == phone))
         account = result.scalar_one_or_none()
         if account:
             account.session_file = _session_path(phone)  # keep for compat
-            account.session_string = session_str
+            account.session_string = encrypted_session
             account.is_active = True
             account.display_name = display_name
         else:
             account = TgAccount(
                 phone=phone,
                 session_file=_session_path(phone),
-                session_string=session_str,
+                session_string=encrypted_session,
                 is_active=True,
                 display_name=display_name,
             )
@@ -936,7 +941,7 @@ async def _try_reconnect_inner(account_id: UUID) -> TelegramClient | None:
     if not account:
         return None
     try:
-        session = StringSession(account.session_string) if account.session_string else account.session_file
+        session = StringSession(decrypt_session(account.session_string)) if account.session_string else account.session_file
         client = TelegramClient(
             session,
             settings.TG_API_ID,
@@ -1169,9 +1174,12 @@ async def startup_listeners() -> None:
     print(f"[STARTUP] Found {len(accounts)} active TG accounts")
     for account in accounts:
         try:
-            # Prefer StringSession from DB (no SQLite lock), fallback to file
+            # Prefer StringSession from DB (no SQLite lock), fallback to file.
+            # decrypt_session() handles both Fernet-encrypted and legacy
+            # plaintext rows transparently. Plaintext rows get re-encrypted
+            # below once we confirm the session works.
             if account.session_string:
-                session = StringSession(account.session_string)
+                session = StringSession(decrypt_session(account.session_string))
                 print(f"[STARTUP] Connecting {account.phone} (StringSession from DB)")
             else:
                 session = account.session_file
@@ -1185,8 +1193,12 @@ async def startup_listeners() -> None:
             authorized = await client.is_user_authorized()
             print(f"[STARTUP] {account.phone} authorized={authorized}")
             if authorized:
-                # Auto-migrate: export SQLite session to StringSession in DB
-                if not account.session_string:
+                # Migration path A: SQLite-only account → export to encrypted StringSession.
+                # Migration path B: existing plaintext StringSession → re-encrypt in place.
+                needs_migration = (not account.session_string) or (
+                    not is_session_encrypted(account.session_string)
+                )
+                if needs_migration:
                     try:
                         # Create a StringSession from the connected client's auth data
                         ss = StringSession()
@@ -1196,13 +1208,14 @@ async def startup_listeners() -> None:
                         ss._auth_key = client.session.auth_key
                         ss_str = ss.save()
                         if ss_str and len(ss_str) > 10:
+                            encrypted = encrypt_session(ss_str)
                             async with async_session() as db_mig:
                                 res_mig = await db_mig.execute(select(TgAccount).where(TgAccount.id == account.id))
                                 acc_mig = res_mig.scalar_one_or_none()
                                 if acc_mig:
-                                    acc_mig.session_string = ss_str
+                                    acc_mig.session_string = encrypted
                                     await db_mig.commit()
-                                    print(f"[STARTUP] Migrated {account.phone} to StringSession ({len(ss_str)} chars)")
+                                    print(f"[STARTUP] Encrypted/migrated session for {account.phone} ({len(ss_str)} chars)")
                     except Exception as e_mig:
                         print(f"[STARTUP] Could not migrate session for {account.phone}: {e_mig}")
 

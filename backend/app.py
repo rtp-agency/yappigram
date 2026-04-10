@@ -217,10 +217,13 @@ async def serve_media(file_path: str):
     from urllib.parse import unquote
     # URL-decode path (handles cyrillic and special chars)
     file_path = unquote(file_path)
-    # Prevent path traversal
-    safe_path = os.path.join(MEDIA_DIR, file_path)
-    safe_path = os.path.abspath(safe_path)
-    if not safe_path.startswith(os.path.abspath(MEDIA_DIR)):
+    # Prevent path traversal. The bare startswith() on os.path.abspath
+    # would let `/app/media-evil/foo` slip past the check because
+    # `/app/media-evil/foo`.startswith(`/app/media`) is True. Use realpath
+    # (resolves symlinks) and require an os.sep boundary, or exact match.
+    media_root = os.path.realpath(MEDIA_DIR)
+    safe_path = os.path.realpath(os.path.join(media_root, file_path))
+    if not (safe_path == media_root or safe_path.startswith(media_root + os.sep)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
     if not os.path.isfile(safe_path):
         raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -761,7 +764,12 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
     if not settings.POSTFORGE_API_URL:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "SSO not configured")
 
-    # Verify PostForge token by calling PostForge /api/me
+    # Verify PostForge token by calling PostForge /api/me. The CRM does
+    # NOT independently validate the JWT signature — it trusts that a
+    # 200 response from PostForge means the token is valid. This is
+    # acceptable because the only way to get a 200 is to have a valid
+    # PostForge JWT, which is the same credential the user would have
+    # to compromise to access PostForge anyway.
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -775,8 +783,16 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
         import logging
         logging.getLogger(__name__).error(f"Cannot reach PostForge: {e}")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Cannot reach PostForge")
+    except ValueError:  # JSON decode error
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Invalid response from PostForge")
 
-    pf_user_id = str(pf_user.get("id"))
+    # Defense in depth: validate the PostForge response shape. A 200
+    # with a missing/null 'id' would otherwise be coerced to the string
+    # "None" and create a shared "None" Staff row anyone could claim.
+    if not isinstance(pf_user, dict) or not pf_user.get("id"):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Malformed PostForge user response")
+
+    pf_user_id = str(pf_user["id"])
     pf_email = pf_user.get("email", "")
     pf_nickname = pf_user.get("nickname", "User")
     pf_tg_id = pf_user.get("telegram_id")  # If PostForge user has linked Telegram
@@ -1657,12 +1673,22 @@ async def send_msg(contact_id: UUID, req: SendMessage, user: CurrentUser, db: DB
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
-    # Resolve reply-to
+    # Resolve reply-to. Filter by contact_id so a user can't reference a
+    # message from a different contact (or from another tenant entirely).
+    # Without this filter, sending POST /api/messages/{contact_id}/send
+    # with reply_to_msg_id set to ANY message UUID would happily resolve
+    # the row, exfiltrating its tg_message_id and content preview into
+    # the response — a cross-tenant message disclosure vector.
     reply_to_tg_msg_id = None
     reply_to_msg_id = None
     reply_to_content_preview = None
     if req.reply_to_msg_id:
-        rr = await db.execute(select(Message).where(Message.id == req.reply_to_msg_id))
+        rr = await db.execute(
+            select(Message).where(
+                Message.id == req.reply_to_msg_id,
+                Message.contact_id == contact.id,
+            )
+        )
         ref_msg = rr.scalar_one_or_none()
         if ref_msg:
             reply_to_tg_msg_id = ref_msg.tg_message_id
@@ -1828,12 +1854,14 @@ async def send_media(
     else:
         media_type = "document"
 
-    # Save file locally
-    ext = os.path.splitext(file.filename or "")[1] or ""
+    # Save file locally. Strip any path components from the user-supplied
+    # extension (defence in depth — uuid filename should be safe but the
+    # ext could still contain '../' if a client crafted a weird filename).
+    ext = os.path.splitext(os.path.basename(file.filename or ""))[1] or ""
     filename = f"{uuid_mod.uuid4()}{ext}"
-    filepath = os.path.join(MEDIA_DIR, filename)
-    filepath = os.path.abspath(filepath)
-    if not filepath.startswith(os.path.abspath(MEDIA_DIR)):
+    media_root = os.path.realpath(MEDIA_DIR)
+    filepath = os.path.realpath(os.path.join(media_root, filename))
+    if not filepath.startswith(media_root + os.sep):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid filename")
     data = await file.read()
     MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
@@ -2026,10 +2054,32 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Template has no blocks")
 
     sent_messages = []
+    media_root = os.path.realpath(MEDIA_DIR)
     for i, block in enumerate(blocks):
         block_media_path = None
-        if block.get("media_path"):
-            block_media_path = os.path.join(MEDIA_DIR, block["media_path"])
+        raw_media = block.get("media_path")
+        if raw_media:
+            # Templates store media_path as user-controlled JSON. Without
+            # this guard a crafted template ("../../../etc/passwd") would
+            # let send_message() read arbitrary files via Telethon's file
+            # parameter and ship them out to a Telegram chat.
+            #
+            # Resolve the candidate path against MEDIA_DIR, then verify
+            # the result is still inside MEDIA_DIR via realpath. Reject
+            # anything that escapes — also rejects symlinks pointing
+            # outside the directory tree.
+            candidate = os.path.realpath(os.path.join(media_root, raw_media))
+            if not candidate.startswith(media_root + os.sep) and candidate != media_root:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Block {i+1}: invalid media path",
+                )
+            if not os.path.isfile(candidate):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Block {i+1}: media file not found",
+                )
+            block_media_path = candidate
 
         text = block.get("content") or None
         media_type = block.get("media_type") or block.get("type")
