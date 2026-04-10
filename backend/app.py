@@ -537,6 +537,11 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_scheduled_messages_status ON scheduled_messages(status) WHERE status = 'pending';
                 CREATE INDEX IF NOT EXISTS ix_staff_postforge_user ON staff(postforge_user_id);
                 CREATE INDEX IF NOT EXISTS ix_messages_media_missing ON messages (contact_id, media_type) WHERE media_type IS NOT NULL AND media_type != 'sticker';
+                -- Audit log: extended columns for SOC2-ready trail
+                ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS target_id VARCHAR;
+                ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS target_type VARCHAR;
+                ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS metadata_json JSONB;
+                ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS ip_address VARCHAR;
                 -- Auto-approve all pending contacts (no approval flow)
                 UPDATE contacts SET status = 'approved' WHERE status = 'pending';
             EXCEPTION WHEN OTHERS THEN NULL;
