@@ -3722,11 +3722,11 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             if peer_id == 777000:
                 continue
 
-            # Skip archived dialogs — they should go to the archive
-            # folder, not the main chat list. Users can view archived
-            # chats separately via the "Архив" button.
-            if getattr(dialog, "archived", False):
-                continue
+            # Sync archive status from Telegram. If a dialog is archived in TG,
+            # the corresponding Contact should be marked is_archived=True (and vice
+            # versa). Previously we just `continue`-d on archived dialogs, which meant
+            # a contact archived in TG stayed is_archived=False in CRM forever.
+            is_tg_archived = bool(getattr(dialog, "archived", False))
 
             # Update last_message_at for existing contacts from Telegram dialog date
             result = await db.execute(
@@ -3734,12 +3734,22 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             )
             existing = result.scalars().first()
             if existing:
+                # Sync archive status from Telegram — but only in one direction:
+                # TG archived → CRM archived.  We do NOT unarchive in CRM just
+                # because TG says the dialog is not archived — the user may have
+                # archived it manually in CRM UI and we must respect that.
+                if is_tg_archived and not existing.is_archived:
+                    existing.is_archived = True
                 # Sync last_message_at from Telegram if more recent
                 dialog_date = getattr(dialog, "date", None)
                 if dialog_date:
                     tg_ts = dialog_date.replace(tzinfo=None) if dialog_date.tzinfo else dialog_date
                     if not existing.last_message_at or tg_ts > existing.last_message_at:
                         existing.last_message_at = tg_ts
+                continue
+
+            # Don't create new contacts for archived dialogs — only sync existing ones
+            if is_tg_archived:
                 continue
 
             # Determine chat type

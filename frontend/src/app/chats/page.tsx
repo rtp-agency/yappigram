@@ -618,10 +618,12 @@ function ChatsContent() {
 
   // Account switcher
   const [accountsList, setAccountsList] = useState<TgStatusAccount[]>([]);
-  const [filterAccountId, setFilterAccountId] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return sessionStorage.getItem("crm_selected_account") || null;
-  });
+  // Start with null — DON'T read from sessionStorage until fetchTgStatus
+  // validates the stored value. This prevents the race condition where
+  // refetchContacts fires with a stale account ID before validation,
+  // causing "No chats" to flash (or stick) on every /settings → /chats nav.
+  const [accountsReady, setAccountsReady] = useState(false);
+  const [filterAccountId, setFilterAccountId] = useState<string | null>(null);
 
   // Forum topics
   const [topics, setTopics] = useState<{ id: number; name: string }[]>([]);
@@ -693,44 +695,53 @@ function ChatsContent() {
   // without doing nested setState (which is an anti-pattern)
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
 
-  // Fetch TG accounts for switcher — validate stored account on every mount.
-  // If sessionStorage has a stale account ID (from a different CRM instance,
-  // previous session, or a reconnected account), the contacts fetch would
-  // filter by that ghost ID and return empty → "No chats found". Clear it
-  // aggressively to prevent this.
+  // Fetch TG accounts FIRST, validate the stored selection, THEN allow
+  // contacts to load. This eliminates the race where refetchContacts fires
+  // with a stale/invalid account ID before validation completes, causing
+  // "No chats" on every /settings → /chats navigation.
   useEffect(() => {
     fetchTgStatus().then((rawAccs) => {
       const accs = rawAccs.filter((a: any) => a.is_active);
       setAccountsList(accs);
-      if (accs.length === 0) return;
+
+      if (accs.length === 0) {
+        setAccountsReady(true);
+        return;
+      }
 
       const stored = sessionStorage.getItem("crm_selected_account");
       const isValid = stored && accs.some((a: any) => a.id === stored);
 
       if (accs.length === 1) {
-        // Single account — always select it, no ambiguity
         setFilterAccountId(accs[0].id);
         sessionStorage.setItem("crm_selected_account", accs[0].id);
-      } else if (!isValid) {
-        // Stored account doesn't exist in current active list — reset
+      } else if (isValid) {
+        // Stored account is valid — use it
+        setFilterAccountId(stored);
+      } else {
+        // Invalid or missing — clear
         setFilterAccountId(null);
         sessionStorage.removeItem("crm_selected_account");
       }
-      // else: stored is valid, keep it
-    }).catch(console.error);
+      setAccountsReady(true);
+    }).catch((err) => {
+      console.error("fetchTgStatus failed:", err);
+      // Even on failure, mark ready so the UI isn't stuck loading forever.
+      // Contacts will load without account filter (shows all org contacts).
+      setAccountsReady(true);
+    });
   }, []);
 
-  // Account-aware data fetching — consolidated into one effect with
-  // AbortController so switching accounts rapidly doesn't pile up stale
-  // requests that overwrite newer state (was causing UI freeze after 2-3
-  // switches).
+  // Account-aware data fetching — gated behind accountsReady to prevent
+  // firing with stale/invalid filterAccountId before TG account validation.
+  // AbortController cancels in-flight requests when filterAccountId changes.
   useEffect(() => {
+    if (!accountsReady) return;
+
     const acctId = filterAccountId || undefined;
     const ctrl = new AbortController();
     const sig = ctrl.signal;
 
-    // Fire all account-scoped fetches in parallel, but abort them all
-    // if filterAccountId changes before they complete.
     const qp = acctId ? `?tg_account_id=${acctId}` : "";
 
     fetchUnread(acctId).then((data) => {
@@ -746,7 +757,7 @@ function ChatsContent() {
     }).catch(() => {});
 
     return () => ctrl.abort();
-  }, [filterAccountId]);
+  }, [filterAccountId, accountsReady]);
 
   // Save draft on page unload — use refs to avoid stale closures and ensure cleanup
   const selectedForSaveRef = useRef<Contact | null>(null);
@@ -770,9 +781,10 @@ function ChatsContent() {
   // Drafts are initialized from localStorage in useState above
 
   // Re-fetch contacts when account filter changes OR page becomes visible.
-  // Next.js App Router may preserve state between navigations (settings→chats),
-  // so we also listen for visibilitychange to catch returning to the page.
+  // Gated behind accountsReady — NEVER fetch contacts with an unvalidated
+  // account ID, otherwise stale sessionStorage values cause "No chats".
   const refetchContacts = useCallback(() => {
+    if (!accountsReady) return;
     const acctId = filterAccountId || undefined;
     Promise.all([
       fetchContacts(undefined, acctId, false),
@@ -780,7 +792,7 @@ function ChatsContent() {
     ]).then(([normal, archived]) => {
       setContacts([...normal, ...archived]);
     }).catch(() => {});
-  }, [filterAccountId]);
+  }, [filterAccountId, accountsReady]);
 
   useEffect(() => {
     refetchContacts();
