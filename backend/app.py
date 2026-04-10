@@ -3739,12 +3739,12 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             )
             existing = result.scalars().first()
             if existing:
-                # Sync archive status from Telegram — but only in one direction:
-                # TG archived → CRM archived.  We do NOT unarchive in CRM just
-                # because TG says the dialog is not archived — the user may have
-                # archived it manually in CRM UI and we must respect that.
-                if is_tg_archived and not existing.is_archived:
-                    existing.is_archived = True
+                # Do NOT sync archive status from Telegram for existing contacts.
+                # If the user unarchives a contact in CRM, the periodic sync would
+                # immediately re-archive it because it's still archived in TG —
+                # creating an infinite loop where the contact keeps bouncing back
+                # to archive. Archive status for existing contacts is managed
+                # exclusively through the CRM UI (archive/unarchive endpoints).
                 # Sync last_message_at from Telegram if more recent
                 dialog_date = getattr(dialog, "date", None)
                 if dialog_date:
