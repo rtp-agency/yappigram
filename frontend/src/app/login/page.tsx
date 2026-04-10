@@ -134,25 +134,18 @@ export default function LoginPage() {
         //      selection can't leak — the remaining risk is acceptable.
 
         if (!isInIframe) {
-          // Direct access: PostForge user may have changed — re-SSO using PostForge token
-          const pfToken = localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
-          if (pfToken) {
-            clearAllCrmStorage();
-            disconnectWS();
-            const ok = await ssoAuth(pfToken);
-            if (cancelled) return;
-            if (ok) {
-              const base = window.location.pathname.split("/login")[0] || "";
-              window.location.href = base + "/chats/";
-            } else {
-              setStatus("error");
-            }
-            return;
-          }
+          // Direct access (crm.metra-ai.org): user already has a valid CRM token
+          // (ownership check passed above). Just redirect to /chats.
+          // We do NOT force re-SSO here because:
+          //   1) The PostForge token in localStorage is from the CRM domain, not PostForge
+          //   2) Forcing re-SSO with a stale/wrong-domain token causes "auth failed"
+          //   3) The ownership check already verified the CRM token belongs to the right user
+          const base = window.location.pathname.split("/login")[0] || "";
+          window.location.href = base + "/chats/";
+          return;
+
+          Legacy re-SSO disabled — see comment above. */
         }
-        const base = window.location.pathname.split("/chats")[0]?.split("/login")[0]?.split("/settings")[0] || "";
-        window.location.href = base + "/chats/";
-        return;
       }
 
       // SSO token (standalone window open from PostForge)
