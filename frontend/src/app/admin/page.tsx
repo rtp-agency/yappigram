@@ -48,7 +48,7 @@ type AccountEntry = {
   display_name: string | null;
   org_id: string | null;
   connected: boolean;
-  created_at: string | null;
+  connected_at: string | null;
   disconnected_at: string | null;
 };
 
@@ -433,7 +433,7 @@ function AccountsTab() {
                 </span>
               </td>
               <td className="px-3 py-2 text-slate-500 whitespace-nowrap">
-                {a.created_at ? new Date(a.created_at).toLocaleDateString("ru-RU") : "—"}
+                {a.connected_at ? new Date(a.connected_at).toLocaleDateString("ru-RU") : "—"}
               </td>
             </tr>
           ))}
