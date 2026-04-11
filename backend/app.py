@@ -4881,9 +4881,15 @@ async def report_new_chats(
     tg_account_id: UUID | None = Query(None),
     timezone: str = Query("UTC"),
 ):
-    """Report: new chats (contacts) created in a date range, grouped by day and account."""
-    from datetime import date as date_type
+    """Report: chats where the FIRST message landed inside the date range.
 
+    The previous implementation counted `Contact.created_at BETWEEN from AND to`,
+    which is the database insert timestamp — a sync run dumped every existing
+    Telegram chat with created_at=now(), producing huge false counts like
+    "371 new chats today". The correct signal is the earliest real message
+    in the chat: `MIN(messages.created_at) WHERE contact_id=X`. If that
+    minimum falls in the period, the chat really became active then.
+    """
     # Validate timezone
     if timezone not in VALID_TIMEZONES:
         timezone = "UTC"
@@ -4897,32 +4903,52 @@ async def report_new_chats(
     org = _org_id(user)
     org_accounts = select(TgAccount.id).where(TgAccount.org_id == org)
 
-    # Base filter
-    base_filter = [
+    # Subquery: (contact_id, first_message_at) for every contact that has
+    # at least one message. Backed by ix_messages_contact_created.
+    first_msg_sub = (
+        select(
+            Message.contact_id.label("contact_id"),
+            func.min(Message.created_at).label("first_at"),
+        )
+        .group_by(Message.contact_id)
+        .subquery()
+    )
+
+    base_where = [
         Contact.tg_account_id.in_(org_accounts),
-        Contact.created_at >= start,
-        Contact.created_at <= end,
+        first_msg_sub.c.first_at >= start,
+        first_msg_sub.c.first_at <= end,
     ]
     if tg_account_id:
-        base_filter.append(Contact.tg_account_id == tg_account_id)
+        base_where.append(Contact.tg_account_id == tg_account_id)
+    # Operator scope — same as list_contacts.
+    if user.role == "operator":
+        op_sub = select(StaffTgAccount.tg_account_id).where(StaffTgAccount.staff_id == user.id)
+        base_where.append(Contact.tg_account_id.in_(op_sub))
 
-    # Total count
-    total_q = select(func.count(Contact.id)).where(*base_filter)
-    total_result = await db.execute(total_q)
-    total = total_result.scalar() or 0
+    # --- total ---
+    total_q = (
+        select(func.count(Contact.id))
+        .join(first_msg_sub, first_msg_sub.c.contact_id == Contact.id)
+        .where(*base_where)
+    )
+    total = (await db.execute(total_q)).scalar() or 0
 
-    # By day — convert created_at to target timezone, then group by date
-    day_expr = func.date(Contact.created_at.op("AT TIME ZONE")("UTC").op("AT TIME ZONE")(timezone))
+    # --- by day (in target timezone) ---
+    day_expr = func.date(first_msg_sub.c.first_at.op("AT TIME ZONE")("UTC").op("AT TIME ZONE")(timezone))
     by_day_q = (
         select(day_expr.label("day"), func.count(Contact.id).label("cnt"))
-        .where(*base_filter)
+        .join(first_msg_sub, first_msg_sub.c.contact_id == Contact.id)
+        .where(*base_where)
         .group_by(day_expr)
         .order_by(day_expr)
     )
-    by_day_result = await db.execute(by_day_q)
-    by_day = [{"date": str(row.day), "count": row.cnt} for row in by_day_result.all()]
+    by_day = [
+        {"date": str(row.day), "count": row.cnt}
+        for row in (await db.execute(by_day_q)).all()
+    ]
 
-    # By account
+    # --- by account ---
     by_account_q = (
         select(
             TgAccount.id.label("account_id"),
@@ -4930,12 +4956,12 @@ async def report_new_chats(
             TgAccount.display_name,
             func.count(Contact.id).label("cnt"),
         )
+        .join(first_msg_sub, first_msg_sub.c.contact_id == Contact.id)
         .join(TgAccount, Contact.tg_account_id == TgAccount.id)
-        .where(*base_filter)
+        .where(*base_where)
         .group_by(TgAccount.id, TgAccount.phone, TgAccount.display_name)
         .order_by(func.count(Contact.id).desc())
     )
-    by_account_result = await db.execute(by_account_q)
     by_account = [
         {
             "account_id": str(row.account_id),
@@ -4943,7 +4969,7 @@ async def report_new_chats(
             "display_name": row.display_name,
             "count": row.cnt,
         }
-        for row in by_account_result.all()
+        for row in (await db.execute(by_account_q)).all()
     ]
 
     return {"total": total, "by_day": by_day, "by_account": by_account}
