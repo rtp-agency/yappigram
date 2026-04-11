@@ -125,7 +125,7 @@ async def _validate_upload(file: "UploadFile") -> None:
     if ext == ".wav" and head[8:12] != b"WAVE":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not a valid WAV file")
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete as sa_delete, func, select, text as sa_text, update as sa_update
@@ -5426,6 +5426,72 @@ async def admin_all_staff(user: CrmAdminUser, db: DB):
             "created_at": s.created_at.isoformat() if s.created_at else None,
         })
     return {"staff": staff_list, "total": len(staff_list)}
+
+
+# ============================================================
+# Internal — called by PostForge backend
+# ============================================================
+# Authenticated by the shared POSTFORGE_BOT_SECRET (same value as
+# PostForge's BACKEND_BOT_SECRET — both sides have it as a secret env var).
+
+def _verify_bot_secret(authorization: str = Header(default="")) -> None:
+    """FastAPI dependency: require Authorization: Bot <POSTFORGE_BOT_SECRET>."""
+    expected = settings.POSTFORGE_BOT_SECRET or ""
+    if not expected:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "POSTFORGE_BOT_SECRET not configured")
+    if not authorization.startswith("Bot "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bot token")
+    token = authorization[4:].strip()
+    import hmac as _hmac
+    if not _hmac.compare_digest(token, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid bot token")
+
+
+class _StaffSyncRoleRequest(PydanticBaseModel):
+    postforge_user_id: str
+    postforge_org_id: str
+    new_role: str  # 'super_admin' | 'admin' | 'operator'
+
+
+@app.post("/api/internal/staff/sync-role")
+async def internal_sync_staff_role(
+    req: _StaffSyncRoleRequest,
+    db: DB,
+    _: None = Depends(_verify_bot_secret),
+):
+    """Synchronize a Staff record's role from PostForge.
+
+    Called by PostForge after `transfer_ownership` so the CRM staff role
+    matches the new PostForge role without waiting for the affected user
+    to re-login. Idempotent — if the staff doesn't exist yet (user never
+    opened CRM), this is a no-op.
+    """
+    valid_roles = {"super_admin", "admin", "operator"}
+    if req.new_role not in valid_roles:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid role: {req.new_role}")
+
+    result = await db.execute(
+        select(Staff).where(
+            Staff.postforge_user_id == req.postforge_user_id,
+            Staff.postforge_org_id == req.postforge_org_id,
+            Staff.is_active.is_(True),
+        )
+    )
+    staff = result.scalar_one_or_none()
+    if not staff:
+        # User never opened CRM in this org context — nothing to sync.
+        # On first SSO login the role will be set correctly from PostForge.
+        return {"ok": True, "synced": False, "reason": "no staff row"}
+
+    if staff.role == req.new_role:
+        return {"ok": True, "synced": False, "reason": "already up to date"}
+
+    old_role = staff.role
+    staff.role = req.new_role
+    await db.commit()
+
+    print(f"[INTERNAL] Synced staff role for pf_user={req.postforge_user_id} org={req.postforge_org_id}: {old_role} -> {req.new_role}", flush=True)
+    return {"ok": True, "synced": True, "old_role": old_role, "new_role": req.new_role}
 
 
 # ============================================================
