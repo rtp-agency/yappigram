@@ -4615,6 +4615,12 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
         tg_last_msg_at = None
         if dialog_date:
             tg_last_msg_at = dialog_date.replace(tzinfo=None) if dialog_date.tzinfo else dialog_date
+        # Native-Telegram read state — every Dialog carries the max
+        # message_id the user has acknowledged as read in their TG app.
+        # Anything <= read_inbox_max_id is already read. We use this
+        # to backfill CRM's is_read flag so a chat read on the phone
+        # doesn't keep a stale unread badge after opening CRM.
+        tg_read_inbox_max_id = getattr(getattr(dialog, "dialog", None), "read_inbox_max_id", None) or 0
 
         # --- short-lived session: update-existing-or-create path ---
         async with async_session() as db:
@@ -4650,6 +4656,28 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
                 if tg_last_msg_at and (not existing.last_message_at or tg_last_msg_at > existing.last_message_at):
                     existing.last_message_at = tg_last_msg_at
                     dirty = True
+
+                # Sync native-TG read state in bulk. One UPDATE per contact
+                # that actually had unread messages below the TG high-water
+                # mark. Clears the stale "90 unread" badge the user sees
+                # after reading a chat on their phone while CRM was off.
+                if tg_read_inbox_max_id:
+                    from sqlalchemy import update as sa_update
+                    read_result = await db.execute(
+                        sa_update(Message)
+                        .where(
+                            Message.contact_id == existing.id,
+                            Message.direction == "incoming",
+                            Message.tg_message_id <= tg_read_inbox_max_id,
+                            Message.is_read.is_(False),
+                        )
+                        .values(is_read=True)
+                    )
+                    if read_result.rowcount:
+                        dirty = True
+                        if existing.last_message_direction == "incoming":
+                            existing.last_message_is_read = True
+
                 if dirty:
                     await db.commit()
                     existing_updates += 1

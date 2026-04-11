@@ -1042,13 +1042,39 @@ function ChatsContent() {
         );
       }
       if (event.type === "messages_read") {
-        const readIds = new Set(event.message_ids as string[]);
-        setMessages((prev) =>
-          prev.map((m) => readIds.has(m.id) ? { ...m, is_read: true } : m)
-        );
+        const readIds = new Set((event.message_ids as string[]) || []);
+        if (readIds.size > 0) {
+          setMessages((prev) =>
+            prev.map((m) => readIds.has(m.id) ? { ...m, is_read: true } : m)
+          );
+        }
         // Update contact preview checkmarks
         if (event.contact_id) {
           setContacts((prev) => prev.map((c) => c.id === event.contact_id ? { ...c, last_message_is_read: true } : c));
+        }
+        // Incoming read (user read incoming messages in the native TG
+        // client) — clear the unread badge for this contact. Previously
+        // this branch only handled outgoing reads (double-check mark)
+        // and left the unread counter stale until manual refetch.
+        if (event.direction === "incoming" && event.contact_id) {
+          setUnread((prev) => {
+            if (!prev.has(event.contact_id)) return prev;
+            const next = new Map(prev);
+            next.delete(event.contact_id);
+            return next;
+          });
+          // Also mark the currently-loaded messages as read if the tg_id
+          // is within the native-TG high-water mark from the event.
+          const maxTgId = event.max_tg_id as number | undefined;
+          if (maxTgId) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.direction === "incoming" && m.tg_message_id && m.tg_message_id <= maxTgId && !m.is_read
+                  ? { ...m, is_read: true }
+                  : m
+              )
+            );
+          }
         }
       }
       if (event.type === "contact_deleted") {

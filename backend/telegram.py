@@ -1032,6 +1032,57 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 "type": "messages_read",
                 "contact_id": str(contact.id),
                 "message_ids": msg_ids,
+                "direction": "outgoing",
+            }, org_id=account.org_id)
+
+    @client.on(events.MessageRead(inbox=True))
+    @_safe_handler
+    async def on_inbox_read(event):
+        """Mirror read state from the native Telegram client into CRM.
+
+        Fires when the user reads messages in their own Telegram app — the
+        operator reads a chat on their phone, then opens CRM expecting no
+        unread badge. Without this handler, CRM kept every message as
+        is_read=False until the operator explicitly re-read in CRM.
+        """
+        max_id = event.max_id
+        peer_id = event.chat_id
+        if not max_id or not peer_id:
+            return
+        async with async_session() as db:
+            contact = (await db.execute(
+                select(Contact).where(
+                    Contact.tg_account_id == account.id,
+                    Contact.real_tg_id == peer_id,
+                ).limit(1)
+            )).scalar_one_or_none()
+            if not contact:
+                return
+
+            # Mark all incoming messages up to max_id as read in one shot.
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(Message)
+                .where(
+                    Message.contact_id == contact.id,
+                    Message.direction == "incoming",
+                    Message.tg_message_id <= max_id,
+                    Message.is_read.is_(False),
+                )
+                .values(is_read=True)
+            )
+            # Flip denormalized preview flag if the latest preview is
+            # incoming — clears the chat-list unread badge immediately.
+            if contact.last_message_direction == "incoming":
+                contact.last_message_is_read = True
+            await db.commit()
+
+            # Broadcast so open CRM tabs clear their local unread counters.
+            await ws_manager.broadcast_to_admins({
+                "type": "messages_read",
+                "contact_id": str(contact.id),
+                "direction": "incoming",
+                "max_tg_id": max_id,
             }, org_id=account.org_id)
 
     @client.on(events.MessageDeleted)
