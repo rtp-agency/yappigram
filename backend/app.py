@@ -3385,6 +3385,33 @@ def _build_avatar_signed_url(contact_id: UUID, tg_account_id: UUID, ttl_seconds:
     return f"/api/contacts/{contact_id}/avatar?expires={expires}&sig={sig}"
 
 
+@app.post("/api/contacts/{contact_id}/refresh-avatar", status_code=204)
+async def refresh_contact_avatar(
+    contact_id: UUID,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Manually invalidate the cached avatar file for a contact. The next
+    /avatar request re-downloads from Telegram. Use this when a user wants
+    to see an updated profile photo without waiting for the periodic sync.
+    """
+    result = await db.execute(
+        select(Contact.id).where(
+            Contact.id == contact_id,
+            Contact.tg_account_id.in_(_org_accounts_subq(user)),
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    avatar_path = os.path.join(MEDIA_DIR, "avatars", f"{contact_id}.jpg")
+    try:
+        if os.path.exists(avatar_path):
+            os.remove(avatar_path)
+    except Exception:
+        pass
+    return
+
+
 @app.get("/api/contacts/{contact_id}/avatar-url")
 async def get_avatar_signed_url(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
     """Return a signed, time-limited URL for a contact's avatar.
@@ -3463,31 +3490,35 @@ async def get_contact_avatar(
     os.makedirs(avatar_dir, exist_ok=True)
     avatar_path = os.path.join(avatar_dir, f"{contact_id}.jpg")
 
+    # Avatar caching TTL. Short enough that a profile-photo change
+    # propagates within a few hours even without sync invalidation, long
+    # enough that we don't hammer Telegram's API. Proactive invalidation
+    # in _do_sync_dialogs handles the fast path (~2h worst case after
+    # photo change), this is the fallback.
+    _AVATAR_DISK_TTL = 6 * 3600       # 6 hours
+    _AVATAR_BROWSER_TTL = 2 * 3600    # 2 hours — browsers refetch after this
+
     def _serve(path: str) -> Response:
         """Serve cached avatar with HTTP caching headers + ETag negotiation."""
         mtime = int(os.path.getmtime(path))
         etag = f'W/"{contact_id}-{mtime}"'
+        cache_control = f"private, max-age={_AVATAR_BROWSER_TTL}"
         # 304 Not Modified shortcut — browser already has a fresh copy
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers={
                 "ETag": etag,
-                "Cache-Control": "private, max-age=86400",
+                "Cache-Control": cache_control,
             })
         return FileResponse(
             path,
             media_type="image/jpeg",
-            headers={
-                "ETag": etag,
-                # 24h browser cache: after first load, avatars render from
-                # disk cache instantly on every subsequent navigation.
-                "Cache-Control": "private, max-age=86400",
-            },
+            headers={"ETag": etag, "Cache-Control": cache_control},
         )
 
-    # Check server-side cache (refresh from Telegram every 24h)
+    # Check server-side cache; refresh from Telegram if stale.
     if os.path.exists(avatar_path):
         age = time.time() - os.path.getmtime(avatar_path)
-        if age < 86400:
+        if age < _AVATAR_DISK_TTL:
             return _serve(avatar_path)
 
     # Download from Telegram — use SMALL version (160x160, ~8-15KB) instead of
@@ -4397,11 +4428,25 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
                     existing.is_archived = True
                     dirty = True
 
-                # Sync stripped thumbnail (may become available after a profile
-                # photo is set, or change when the user updates their photo).
-                if tg_thumb and existing.avatar_thumb != tg_thumb:
+                # Sync stripped thumbnail. Telegram returns a new thumb whenever
+                # the profile photo changes, so a diff here is our signal that
+                # the cached full-res avatar is stale and must be re-downloaded.
+                # Covers all transitions: None→value (new photo), value→value
+                # (photo replaced), value→None (photo removed).
+                if existing.avatar_thumb != tg_thumb:
                     existing.avatar_thumb = tg_thumb
                     dirty = True
+                    # Invalidate the on-disk full-res cache so the next
+                    # /avatar request re-downloads from Telegram. Without
+                    # this, the 24h file cache would keep serving the stale
+                    # image for up to a day after the user changes their
+                    # profile photo in the Telegram app.
+                    try:
+                        _stale_path = os.path.join(MEDIA_DIR, "avatars", f"{existing.id}.jpg")
+                        if os.path.exists(_stale_path):
+                            os.remove(_stale_path)
+                    except Exception as _e:
+                        print(f"[SYNC] avatar cache invalidate failed: {_e}")
 
                 # Sync last_message_at from Telegram if more recent
                 dialog_date = getattr(dialog, "date", None)
