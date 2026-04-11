@@ -620,6 +620,10 @@ async def on_startup():
                 ALTER TABLE staff ADD COLUMN IF NOT EXISTS real_tg_id BIGINT;
                 CREATE INDEX IF NOT EXISTS ix_staff_real_tg_id ON staff (real_tg_id);
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT false;
+                ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT false;
+                -- Supports the contacts-list sort: pinned first, then by recency
+                CREATE INDEX IF NOT EXISTS ix_contacts_pin_recency
+                    ON contacts (tg_account_id, is_archived, is_pinned DESC, last_message_at DESC NULLS LAST);
                 ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS max_recipients INTEGER;
                 ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS contact_ids UUID[] DEFAULT '{}';
                 ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS last_error TEXT;
@@ -1256,8 +1260,8 @@ async def tg_verify(req: TgVerifyRequest, user: CurrentUser, db: DB):
         import logging
         logging.getLogger(__name__).warning(f"CRM billing charge failed (non-blocking): {e}")
 
-    # Auto-sync ALL dialogs in background after connecting
-    asyncio.create_task(_do_sync_dialogs(account.id, 500))
+    # Auto-sync ALL dialogs in background after connecting (no limit)
+    asyncio.create_task(_do_sync_dialogs(account.id, None))
     return account
 
 
@@ -1443,7 +1447,7 @@ async def list_contacts(
             )
         )
 
-    query = query.order_by(Contact.last_message_at.desc().nullslast())
+    query = query.order_by(Contact.is_pinned.desc(), Contact.last_message_at.desc().nullslast())
     query = query.offset(offset).limit(limit)
     result = await db.execute(query)
     contacts = list(result.scalars().all())
@@ -3827,7 +3831,7 @@ async def _auto_sync_on_startup():
             continue
         print(f"[AUTO-SYNC] Syncing all dialogs for {account.phone}...")
         try:
-            imported = await _do_sync_dialogs(account.id, 500)  # None = no limit
+            imported = await _do_sync_dialogs(account.id, None)  # None = no limit
             print(f"[AUTO-SYNC] {account.phone}: imported {imported} new dialogs")
         except Exception as e:
             print(f"[AUTO-SYNC] {account.phone}: error: {e}")
@@ -3994,8 +3998,12 @@ async def _cleanup_disconnected_accounts():
         await asyncio.sleep(86400)  # Run daily
 
 
-async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
-    """Background-safe: import dialogs for a TG account. Returns count imported."""
+async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
+    """Background-safe: import dialogs for a TG account. Returns count imported.
+
+    limit=None means fetch ALL dialogs. Previously defaulted to 500, which
+    silently dropped chats for users with larger archives.
+    """
     from telegram import _clients, generate_alias, _extract_media, sanitize_text
     from crypto import encrypt
 
@@ -4006,6 +4014,7 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
 
     me = await client.get_me()
     imported = 0
+    existing_updates = 0
 
     async with async_session() as db:
         # Verify account exists
@@ -4015,7 +4024,10 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             print(f"[SYNC] Account {account_id} not found in DB")
             return 0
 
-        async for dialog in client.iter_dialogs(limit=limit):
+        # archived=None iterates BOTH main folder AND archive folder.
+        # Default (archived=False) skips archive folder entirely, which meant
+        # archive state could never be synced for dialogs archived in Telegram.
+        async for dialog in client.iter_dialogs(limit=limit, archived=None):
             peer_id = dialog.id
             if not peer_id:
                 continue
@@ -4024,30 +4036,46 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             if peer_id == 777000:
                 continue
 
-            # Sync archive status from Telegram. If a dialog is archived in TG,
-            # the corresponding Contact should be marked is_archived=True (and vice
-            # versa). Previously we just `continue`-d on archived dialogs, which meant
-            # a contact archived in TG stayed is_archived=False in CRM forever.
+            # Sync archive + pin status from Telegram
             is_tg_archived = bool(getattr(dialog, "archived", False))
+            is_tg_pinned = bool(getattr(dialog, "pinned", False))
 
-            # Update last_message_at for existing contacts from Telegram dialog date
+            # Update existing contacts
             result = await db.execute(
                 select(Contact).where(Contact.tg_account_id == account_id, Contact.real_tg_id == peer_id)
             )
             existing = result.scalars().first()
             if existing:
-                # Do NOT sync archive status from Telegram for existing contacts.
-                # If the user unarchives a contact in CRM, the periodic sync would
-                # immediately re-archive it because it's still archived in TG —
-                # creating an infinite loop where the contact keeps bouncing back
-                # to archive. Archive status for existing contacts is managed
-                # exclusively through the CRM UI (archive/unarchive endpoints).
+                dirty = False
+                # Sync pin status — Telegram is the source of truth for pinning
+                # (unlike archive, which the user can override in CRM).
+                if existing.is_pinned != is_tg_pinned:
+                    existing.is_pinned = is_tg_pinned
+                    dirty = True
+
+                # Sync archive: one-way, TG archived -> CRM archived, but do NOT
+                # unarchive if user already unarchived in CRM (prevents the
+                # re-archiving loop that commit 89bf3a4 fixed).
+                if is_tg_archived and not existing.is_archived:
+                    existing.is_archived = True
+                    dirty = True
+
                 # Sync last_message_at from Telegram if more recent
                 dialog_date = getattr(dialog, "date", None)
                 if dialog_date:
                     tg_ts = dialog_date.replace(tzinfo=None) if dialog_date.tzinfo else dialog_date
                     if not existing.last_message_at or tg_ts > existing.last_message_at:
                         existing.last_message_at = tg_ts
+                        dirty = True
+
+                if dirty:
+                    existing_updates += 1
+                    # Batch-commit every 50 dirty existing rows so a long sync
+                    # doesn't hold one giant uncommitted transaction (and so
+                    # pin/archive changes are persisted even if no new contacts
+                    # are created on this run).
+                    if existing_updates % 50 == 0:
+                        await db.commit()
                 continue
 
             # Don't create new contacts for archived dialogs — only sync existing ones
@@ -4096,6 +4124,7 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
                 status="approved",
                 approved_at=datetime.utcnow(),
                 last_message_at=last_msg_at,
+                is_pinned=is_tg_pinned,
             )
             db.add(contact)
             await db.commit()
@@ -4192,10 +4221,11 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = 500) -> int:
             if imported % 10 == 0:
                 await asyncio.sleep(0.5)
 
-        # Commit any last_message_at updates for existing contacts
+        # Final commit: flushes any pending pin/archive/last_message_at updates
+        # for existing contacts that weren't captured by the batch-commit above.
         await db.commit()
 
-    print(f"[SYNC] Finished: imported {imported} dialogs for account {account_id}")
+    print(f"[SYNC] Finished: imported {imported} new, updated {existing_updates} existing for account {account_id}")
     return imported
 
 
@@ -4206,7 +4236,7 @@ async def sync_old_dialogs(account_id: UUID, user: AdminUser, db: DB):
     client = _clients.get(account_id)
     if not client:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account not connected")
-    asyncio.create_task(_do_sync_dialogs(account_id, 500))  # Max 500 dialogs per sync
+    asyncio.create_task(_do_sync_dialogs(account_id, None))  # Sync ALL dialogs
     return {"status": "sync_started"}
 
 

@@ -369,6 +369,7 @@ export interface Contact {
   tg_account_id: string | null;
   real_tg_id: number | null;
   is_archived: boolean;
+  is_pinned?: boolean;
   created_at: string;
   approved_at: string | null;
   last_message_at: string | null;

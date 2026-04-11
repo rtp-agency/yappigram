@@ -116,6 +116,10 @@ class Contact(Base):
     tags = Column(ARRAY(String), default=lambda: [])
     notes = Column(Text)
     is_archived = Column(Boolean, default=False)
+    # Pin status synced FROM Telegram. Represents Telegram's native pin state,
+    # not the CRM's manual PinnedChat table (which is per-staff). Refreshed on
+    # every _do_sync_dialogs run.
+    is_pinned = Column(Boolean, default=False, nullable=False)
 
     created_at = Column(DateTime, default=func.now())
     approved_at = Column(DateTime, nullable=True)

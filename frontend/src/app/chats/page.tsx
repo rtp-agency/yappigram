@@ -1373,6 +1373,15 @@ function ChatsContent() {
   };
 
   const togglePin = async (contactId: string) => {
+    const contact = contacts.find((c) => c.id === contactId);
+    // If the chat is pinned natively in Telegram, the pin state is owned by
+    // Telegram — CRM can't unpin it. Surface this to the user instead of
+    // silently toggling a separate CRM pin (which would leave the icon stuck
+    // "filled" and the unpin button non-functional).
+    if (contact?.is_pinned && !pinned.has(contactId)) {
+      alert("Этот чат закреплён в Telegram. Открепите его в приложении Telegram.");
+      return;
+    }
     const isPinned = pinned.has(contactId);
     try {
       await api(`/api/pinned/${contactId}`, { method: isPinned ? "DELETE" : "POST" });
@@ -1392,8 +1401,10 @@ function ChatsContent() {
       return true;
     })
     .sort((a, b) => {
-      const ap = pinned.has(a.id) ? 2 : drafts.has(a.id) ? 1 : 0;
-      const bp = pinned.has(b.id) ? 2 : drafts.has(b.id) ? 1 : 0;
+      const aPinned = pinned.has(a.id) || !!a.is_pinned;
+      const bPinned = pinned.has(b.id) || !!b.is_pinned;
+      const ap = aPinned ? 2 : drafts.has(a.id) ? 1 : 0;
+      const bp = bPinned ? 2 : drafts.has(b.id) ? 1 : 0;
       if (ap !== bp) return bp - ap;
       const aDate = a.last_message_at || a.created_at || "";
       const bDate = b.last_message_at || b.created_at || "";
@@ -1581,7 +1592,7 @@ function ChatsContent() {
               isSelected={selected?.id === c.id}
               isUnread={unread.has(c.id)}
               unreadCount={unread.get(c.id) || 0}
-              isPinned={pinned.has(c.id)}
+              isPinned={pinned.has(c.id) || !!c.is_pinned}
               draft={drafts.get(c.id)}
               avatarError={avatarErrors.has(c.id)}
               isAdmin={isAdmin}

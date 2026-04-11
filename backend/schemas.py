@@ -96,6 +96,7 @@ class ContactOut(BaseModel):
     tg_account_id: UUID | None
     real_tg_id: int | None = None
     is_archived: bool = False
+    is_pinned: bool = False
     created_at: datetime
     approved_at: datetime | None
     last_message_at: datetime | None

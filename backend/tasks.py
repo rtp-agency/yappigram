@@ -41,7 +41,7 @@ async def auto_sync_on_startup():
         try:
             print(f"[AUTO-SYNC] Syncing all dialogs for {account.phone}...")
             from app import _do_sync_dialogs
-            imported = await _do_sync_dialogs(account.id, 500)
+            imported = await _do_sync_dialogs(account.id, None)  # Full sync
             print(f"[AUTO-SYNC] {account.phone}: imported {imported} new dialogs")
         except Exception as e:
             print(f"[AUTO-SYNC] {account.phone}: error: {e}")
