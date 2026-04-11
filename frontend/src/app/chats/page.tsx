@@ -50,8 +50,9 @@ function cleanFileName(path: string): string {
 }
 
 // Lazy avatar: shows initials immediately, loads real avatar when visible in viewport
-const LazyAvatar = memo(function LazyAvatar({ contactId, alias, chatType, hasError, onError }: {
+const LazyAvatar = memo(function LazyAvatar({ contactId, alias, chatType, hasError, onError, thumb, signedPath }: {
   contactId: string; alias: string; chatType: string; hasError: boolean; onError: () => void;
+  thumb?: string | null; signedPath?: string | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -69,19 +70,34 @@ const LazyAvatar = memo(function LazyAvatar({ contactId, alias, chatType, hasErr
 
   const isGroup = chatType === "group" || chatType === "channel" || chatType === "supergroup";
   const initial = alias.charAt(0).toUpperCase();
+  const fullSrc = visible && !hasError ? avatarUrl(contactId, signedPath) : "";
 
   return (
-    <div ref={ref} className="w-8 h-8 rounded-full shrink-0 relative">
-      {visible && !hasError && (
+    <div ref={ref} className="w-8 h-8 rounded-full shrink-0 relative overflow-hidden">
+      {/* Stripped thumbnail: ~1KB blurred JPEG, shown immediately from /api/contacts
+          payload. Disappears once the full 160x160 avatar finishes loading. */}
+      {thumb && !hasError && (
         <img
-          src={avatarUrl(contactId)}
+          src={thumb}
           alt=""
+          aria-hidden="true"
+          className={`w-8 h-8 rounded-full object-cover absolute inset-0 transition-opacity duration-200 ${loaded ? "opacity-0" : "opacity-100"}`}
+          style={{ filter: "blur(4px)", transform: "scale(1.1)" }}
+        />
+      )}
+      {fullSrc && (
+        <img
+          src={fullSrc}
+          alt=""
+          loading="lazy"
+          decoding="async"
           className={`w-8 h-8 rounded-full object-cover absolute inset-0 transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
           onLoad={() => setLoaded(true)}
           onError={onError}
         />
       )}
-      <div className={`w-8 h-8 rounded-full bg-surface-card border border-surface-border flex items-center justify-center transition-opacity duration-300 ${loaded ? "opacity-0" : "opacity-100"}`}>
+      {/* Placeholder: shown only when there's no thumb AND the full avatar hasn't loaded. */}
+      <div className={`w-8 h-8 rounded-full bg-surface-card border border-surface-border flex items-center justify-center transition-opacity duration-200 ${loaded || thumb ? "opacity-0" : "opacity-100"}`}>
         {isGroup ? (
           <svg className="w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
@@ -264,7 +280,15 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, isUnread, u
     >
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <LazyAvatar contactId={c.id} alias={c.alias} chatType={c.chat_type} hasError={avatarError} onError={onAvatarError} />
+          <LazyAvatar
+            contactId={c.id}
+            alias={c.alias}
+            chatType={c.chat_type}
+            hasError={avatarError}
+            onError={onAvatarError}
+            thumb={c.avatar_thumb}
+            signedPath={c.avatar_url}
+          />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className={`font-medium text-sm truncate ${isUnread ? "text-white" : ""}`}>{c.alias}</span>
@@ -2382,13 +2406,29 @@ function ChatsContent() {
 
           {/* Avatar + name + info */}
           <div className="p-4 flex flex-col items-center text-center border-b border-surface-border shrink-0">
-            <div className="w-16 h-16 rounded-full bg-surface border border-surface-border overflow-hidden mb-3">
-              <img
-                src={avatarUrl(selected.id)}
-                alt=""
-                className="w-full h-full object-cover"
-                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-              />
+            <div className="w-16 h-16 rounded-full bg-surface border border-surface-border overflow-hidden mb-3 relative">
+              {selected.avatar_thumb && (
+                <img
+                  src={selected.avatar_thumb}
+                  alt=""
+                  aria-hidden="true"
+                  className="absolute inset-0 w-full h-full object-cover"
+                  style={{ filter: "blur(6px)", transform: "scale(1.1)" }}
+                />
+              )}
+              {(() => {
+                const url = avatarUrl(selected.id, selected.avatar_url);
+                return url ? (
+                  <img
+                    src={url}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    className="relative w-full h-full object-cover"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                  />
+                ) : null;
+              })()}
             </div>
             <div className="text-sm font-semibold text-white">{selected.alias}</div>
             {selected.real_tg_id && (

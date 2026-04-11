@@ -121,6 +121,12 @@ class Contact(Base):
     # every _do_sync_dialogs run.
     is_pinned = Column(Boolean, default=False, nullable=False)
 
+    # Telegram stripped profile thumbnail as a data URL (`data:image/jpeg;base64,...`).
+    # ~700-1200 bytes, blurry 60x60 — shown instantly in the chat list while the
+    # full avatar loads in the background. Refreshed on every _do_sync_dialogs
+    # run from `entity.photo.stripped_thumb`.
+    avatar_thumb = Column(Text, nullable=True)
+
     created_at = Column(DateTime, default=func.now())
     approved_at = Column(DateTime, nullable=True)
     last_message_at = Column(DateTime, nullable=True)

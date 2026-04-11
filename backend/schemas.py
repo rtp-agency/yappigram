@@ -97,6 +97,8 @@ class ContactOut(BaseModel):
     real_tg_id: int | None = None
     is_archived: bool = False
     is_pinned: bool = False
+    avatar_thumb: str | None = None
+    avatar_url: str | None = None
     created_at: datetime
     approved_at: datetime | None
     last_message_at: datetime | None

@@ -370,6 +370,8 @@ export interface Contact {
   real_tg_id: number | null;
   is_archived: boolean;
   is_pinned?: boolean;
+  avatar_thumb?: string | null;
+  avatar_url?: string | null;
   created_at: string;
   approved_at: string | null;
   last_message_at: string | null;
@@ -599,24 +601,24 @@ export async function unarchiveContact(contactId: string) {
 // Avatars
 // ============================================================
 
-// Signed avatar URL cache — avoids re-fetching on every render.
-// Structure: contactId → { url: signed URL, expires: timestamp }
+/**
+ * Build a full avatar URL from a relative signed path returned by the backend.
+ * The backend now includes `avatar_url` inline in every ContactOut, so callers
+ * should pass that value directly — this helper just prepends the API origin.
+ *
+ * If `signedPath` is missing (e.g. a contact fetched before this field
+ * existed), falls back to the `/avatar-url` round-trip. The fallback is cached
+ * so subsequent renders don't refetch.
+ */
 const _avatarCache: Map<string, { url: string; expires: number }> = new Map();
 const _avatarFetching: Set<string> = new Set();
 
-/**
- * Get an avatar URL for a contact. Returns immediately (sync) so it works
- * in <img src={}> JSX. On first call returns a legacy URL, then fetches
- * a signed URL in the background. On subsequent calls returns the cached
- * signed URL (valid ~50 min). This way the JWT never appears in a URL
- * after the first fetch completes.
- */
-export function avatarUrl(contactId: string): string {
-  // Return cached signed URL if valid
+export function avatarUrl(contactId: string, signedPath?: string | null): string {
+  if (signedPath) return `${API}${signedPath}`;
+
   const cached = _avatarCache.get(contactId);
   if (cached && cached.expires > Date.now()) return cached.url;
 
-  // Fire async fetch for signed URL (non-blocking)
   if (!_avatarFetching.has(contactId)) {
     _avatarFetching.add(contactId);
     api(`/api/contacts/${contactId}/avatar-url`)
@@ -624,17 +626,15 @@ export function avatarUrl(contactId: string): string {
         if (data?.url) {
           _avatarCache.set(contactId, {
             url: `${API}${data.url}`,
-            expires: Date.now() + 50 * 60 * 1000,
+            expires: Date.now() + 23 * 60 * 60 * 1000,
           });
         }
       })
-      .catch(() => { /* endpoint not available — stay on legacy */ })
+      .catch(() => {})
       .finally(() => _avatarFetching.delete(contactId));
   }
 
-  // Sync fallback: legacy token-in-URL (used until signed URL arrives)
-  const tokens = getTokens();
-  return `${API}/api/contacts/${contactId}/avatar?token=${tokens?.access_token || ""}`;
+  return "";
 }
 
 // ============================================================

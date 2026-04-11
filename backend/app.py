@@ -621,6 +621,7 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_staff_real_tg_id ON staff (real_tg_id);
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT false;
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT false;
+                ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_thumb TEXT;
                 -- Supports the contacts-list sort: pinned first, then by recency
                 CREATE INDEX IF NOT EXISTS ix_contacts_pin_recency
                     ON contacts (tg_account_id, is_archived, is_pinned DESC, last_message_at DESC NULLS LAST);
@@ -1503,6 +1504,9 @@ async def list_contacts(
             c.last_message_content = None
             c.last_message_direction = None
             c.last_message_is_read = None
+        # Pre-compute signed avatar URL so the frontend doesn't need a
+        # separate round-trip per contact.
+        c.avatar_url = _build_avatar_signed_url(c.id)
 
     # Cache result for 15s
     if cache_key:
@@ -1534,6 +1538,7 @@ async def get_contact(contact_id: UUID, user: CurrentUser, db: DB):
             if real_name:
                 contact.alias = real_name
 
+    contact.avatar_url = _build_avatar_signed_url(contact.id)
     return contact
 
 
@@ -3147,6 +3152,19 @@ async def unarchive_contact(contact_id: UUID, user: CurrentUser, db: DB):
 # Avatars (proxy Telegram profile photos)
 # ============================================================
 
+def _build_avatar_signed_url(contact_id: UUID, ttl_seconds: int = 86400) -> str:
+    """Build an HMAC-signed avatar URL with a 24h expiry by default.
+
+    Used to pre-compute avatar URLs inline in ContactOut responses, so the
+    frontend doesn't need a separate `/avatar-url` round-trip per contact.
+    24h matches the browser Cache-Control on the avatar file itself.
+    """
+    expires = int(time.time()) + ttl_seconds
+    payload = f"{contact_id}:{expires}"
+    sig = hmac.new(settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"/api/contacts/{contact_id}/avatar?expires={expires}&sig={sig}"
+
+
 @app.get("/api/contacts/{contact_id}/avatar-url")
 async def get_avatar_signed_url(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
     """Return a signed, time-limited URL for a contact's avatar.
@@ -3166,22 +3184,20 @@ async def get_avatar_signed_url(contact_id: UUID, user: Annotated[Staff, Depends
     if not result.scalar_one_or_none():
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
-    expires = int(time.time()) + 3600  # 1 hour
-    payload = f"{contact_id}:{expires}"
-    sig = hmac.new(settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
-    return {"url": f"/api/contacts/{contact_id}/avatar?expires={expires}&sig={sig}"}
+    return {"url": _build_avatar_signed_url(contact_id)}
 
 
 @app.get("/api/contacts/{contact_id}/avatar")
 async def get_contact_avatar(
     contact_id: UUID,
+    request: Request,
     db: DB,
     expires: int = Query(0),
     sig: str = Query(""),
     token: str = Query(""),  # Legacy compat — remove after frontend deploys
 ):
     """Serve avatar image. Accepts either HMAC signed URL or legacy JWT token."""
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, Response
 
     if sig and expires:
         # Signed URL auth (preferred — no JWT in URL)
@@ -3223,22 +3239,48 @@ async def get_contact_avatar(
     os.makedirs(avatar_dir, exist_ok=True)
     avatar_path = os.path.join(avatar_dir, f"{contact_id}.jpg")
 
-    # Check cache (refresh every 24h)
+    def _serve(path: str) -> Response:
+        """Serve cached avatar with HTTP caching headers + ETag negotiation."""
+        mtime = int(os.path.getmtime(path))
+        etag = f'W/"{contact_id}-{mtime}"'
+        # 304 Not Modified shortcut — browser already has a fresh copy
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={
+                "ETag": etag,
+                "Cache-Control": "private, max-age=86400",
+            })
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={
+                "ETag": etag,
+                # 24h browser cache: after first load, avatars render from
+                # disk cache instantly on every subsequent navigation.
+                "Cache-Control": "private, max-age=86400",
+            },
+        )
+
+    # Check server-side cache (refresh from Telegram every 24h)
     if os.path.exists(avatar_path):
         age = time.time() - os.path.getmtime(avatar_path)
-        if age < 86400:  # 24h cache
-            return FileResponse(avatar_path, media_type="image/jpeg")
+        if age < 86400:
+            return _serve(avatar_path)
 
-    # Download from Telegram
+    # Download from Telegram — use SMALL version (160x160, ~8-15KB) instead of
+    # the default big version (640x640, ~80KB). Avatars are displayed at 32x32
+    # in the chat list, so the small variant is more than enough and ~10x
+    # faster to download from Telegram's CDN.
     from telegram import _clients
     client = _clients.get(contact.tg_account_id)
     if not client:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not connected")
 
     try:
-        photo = await client.download_profile_photo(contact.real_tg_id, file=avatar_path)
+        photo = await client.download_profile_photo(
+            contact.real_tg_id, file=avatar_path, download_big=False,
+        )
         if photo:
-            return FileResponse(avatar_path, media_type="image/jpeg")
+            return _serve(avatar_path)
     except Exception:
         pass
 
@@ -4004,7 +4046,7 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
     limit=None means fetch ALL dialogs. Previously defaulted to 500, which
     silently dropped chats for users with larger archives.
     """
-    from telegram import _clients, generate_alias, _extract_media, sanitize_text
+    from telegram import _clients, generate_alias, _extract_media, sanitize_text, extract_stripped_thumb
     from crypto import encrypt
 
     client = _clients.get(account_id)
@@ -4039,6 +4081,9 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
             # Sync archive + pin status from Telegram
             is_tg_archived = bool(getattr(dialog, "archived", False))
             is_tg_pinned = bool(getattr(dialog, "pinned", False))
+            # Stripped JPEG thumbnail — tiny inline preview shown while the
+            # full avatar loads. May be None for contacts without a profile photo.
+            tg_thumb = extract_stripped_thumb(dialog.entity)
 
             # Update existing contacts
             result = await db.execute(
@@ -4058,6 +4103,12 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
                 # re-archiving loop that commit 89bf3a4 fixed).
                 if is_tg_archived and not existing.is_archived:
                     existing.is_archived = True
+                    dirty = True
+
+                # Sync stripped thumbnail (may become available after a profile
+                # photo is set, or change when the user updates their photo).
+                if tg_thumb and existing.avatar_thumb != tg_thumb:
+                    existing.avatar_thumb = tg_thumb
                     dirty = True
 
                 # Sync last_message_at from Telegram if more recent
@@ -4125,6 +4176,7 @@ async def _do_sync_dialogs(account_id: UUID, limit: int | None = None) -> int:
                 approved_at=datetime.utcnow(),
                 last_message_at=last_msg_at,
                 is_pinned=is_tg_pinned,
+                avatar_thumb=tg_thumb,
             )
             db.add(contact)
             await db.commit()
