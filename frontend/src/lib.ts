@@ -390,6 +390,7 @@ export interface Message {
   content: string | null;
   media_type: string | null;
   media_path: string | null;
+  media_url?: string | null;
   sent_by: string | null;
   is_read: boolean;
   is_deleted: boolean;
@@ -429,7 +430,14 @@ export function isKeyboardHidden(json: string | null): boolean {
   } catch { return false; }
 }
 
-export function mediaUrl(media_path: string): string {
+/**
+ * Build a media URL. Prefers the HMAC-signed `signed` path returned inline
+ * on MessageOut.media_url — the /media/ endpoint now rejects unsigned
+ * requests. The bare `media_path` fallback works only during the rollout
+ * window while the legacy JWT-token path is still accepted by the backend.
+ */
+export function mediaUrl(media_path: string, signed?: string | null): string {
+  if (signed) return `${API}${signed}`;
   return `${API}/media/${encodeURIComponent(media_path)}`;
 }
 

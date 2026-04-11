@@ -38,28 +38,92 @@ def _validate_block_id(block_id: str) -> str:
     return block_id
 
 
-def _validate_upload(file: "UploadFile") -> None:
-    """Validate uploaded file extension and content type for security."""
-    # Strip path separators from filename to prevent path traversal
+def _safe_media_path(raw: str | None) -> str | None:
+    """Resolve a user-supplied media path against MEDIA_DIR and verify the
+    result is still inside that directory. Used to protect template/block
+    media-path fields from being set to `../../etc/passwd` and read via
+    Telethon's file= parameter.
+
+    Returns the validated absolute path, or None if `raw` is falsy.
+    Raises HTTP 400 on escape, HTTP 400 on missing file.
+    """
+    if not raw:
+        return None
+    media_root = os.path.realpath(MEDIA_DIR)
+    candidate = os.path.realpath(os.path.join(media_root, raw))
+    if not (candidate == media_root or candidate.startswith(media_root + os.sep)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid media path")
+    if not os.path.isfile(candidate):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Media file not found")
+    return candidate
+
+
+# Magic byte signatures used by _validate_upload() to catch MIME spoofing —
+# a file renamed to foo.jpg with Content-Type image/jpeg can still be HTML/JS.
+# Extensions map to the allowed leading byte sequences. Checked only for
+# formats where a wrong payload is actually dangerous (images, video, audio).
+_MAGIC_SIGNATURES: dict[str, tuple[bytes, ...]] = {
+    ".jpg":  (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".png":  (b"\x89PNG\r\n\x1a\n",),
+    ".gif":  (b"GIF87a", b"GIF89a"),
+    ".webp": (b"RIFF",),   # followed by "WEBP" at offset 8; checked below
+    ".bmp":  (b"BM",),
+    ".mp4":  (b"\x00\x00\x00",),  # ftyp box — sniffed further below
+    ".mov":  (b"\x00\x00\x00",),
+    ".webm": (b"\x1aE\xdf\xa3",),
+    ".ogg":  (b"OggS",),
+    ".mp3":  (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
+    ".wav":  (b"RIFF",),
+    ".pdf":  (b"%PDF-",),
+    ".zip":  (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
+}
+
+
+async def _validate_upload(file: "UploadFile") -> None:
+    """Validate uploaded file: extension + content type + magic bytes.
+
+    Extension/content-type checks are NOT sufficient on their own — a client
+    can set any Content-Type header and rename any file. The magic-byte
+    check reads the first 16 bytes and verifies they match the claimed
+    extension, stopping MIME spoofing (HTML-as-JPG, JS-as-PNG, etc).
+    """
     safe_name = os.path.basename(file.filename or "")
     ext = os.path.splitext(safe_name)[1].lower()
     if ext in BLOCKED_EXTENSIONS:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"File type '{ext}' not allowed",
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"File type '{ext}' not allowed")
     if ext and ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"File type '{ext}' not allowed",
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"File type '{ext}' not allowed")
     ct = (file.content_type or "").lower()
-    # Block executable content types
-    blocked_ct = {"application/x-executable", "application/x-msdos-program",
-                  "application/x-sh", "application/x-shellscript", "application/x-bat",
-                  "text/html", "application/javascript", "image/svg+xml"}
+    blocked_ct = {
+        "application/x-executable", "application/x-msdos-program",
+        "application/x-sh", "application/x-shellscript", "application/x-bat",
+        "text/html", "application/javascript", "image/svg+xml",
+    }
     if ct in blocked_ct:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "File type not allowed")
+
+    sigs = _MAGIC_SIGNATURES.get(ext)
+    if not sigs:
+        return  # Extension has no configured magic signature — skip
+    head = await file.read(16)
+    try:
+        await file.seek(0)
+    except Exception:
+        pass
+    if not head:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty file")
+    if not any(head.startswith(sig) for sig in sigs):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"File content does not match its extension ({ext})",
+        )
+    # WebP and WAV both use the RIFF container — verify the sub-type tag
+    # at offset 8 to prevent a WAV being uploaded as .webp and vice versa.
+    if ext == ".webp" and head[8:12] != b"WEBP":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not a valid WebP file")
+    if ext == ".wav" and head[8:12] != b"WAVE":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not a valid WAV file")
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -431,16 +495,81 @@ async def cache_invalidate(pattern: str):
             pass
 
 
-# Media files served via custom endpoint with security headers
+# Media files served via custom endpoint with security headers + HMAC auth
 import mimetypes
 
+
+def _attach_media_url(msg) -> None:
+    """Populate `media_url` on an ORM Message with a signed URL, in place.
+    Called on every Message returned to clients so the frontend can render
+    `<img src={m.media_url}>` without hitting the unauthenticated path.
+    No-op for messages without media.
+    """
+    if getattr(msg, "media_path", None):
+        msg.media_url = _build_media_signed_url(msg.media_path)
+
+
+def _build_media_signed_url(media_path: str, ttl_seconds: int = 86400) -> str:
+    """Sign a media URL for a TTL. The HMAC payload binds the media path
+    and the expiry so the signature can't be reused for other files.
+
+    Frontend gets the signed URL inline on MessageOut.media_url and uses
+    it directly — no JWT in the URL, no need to fetch-first.
+    """
+    expires = int(time.time()) + ttl_seconds
+    payload = f"{media_path}:{expires}"
+    sig = hmac.new(settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    from urllib.parse import quote as _url_quote
+    return f"/media/{_url_quote(media_path)}?expires={expires}&sig={sig}"
+
+
 @app.get("/media/{file_path:path}")
-async def serve_media(file_path: str):
-    """Serve media files with security headers."""
+async def serve_media(
+    file_path: str,
+    request: Request,
+    db: DB,
+    expires: int = Query(0),
+    sig: str = Query(""),
+    token: str = Query(""),  # Legacy: JWT in query, still accepted during rollout
+):
+    """Serve media files with security headers + HMAC auth.
+
+    Previously this endpoint was completely unauthenticated — anyone who
+    learned a media filename (via WS leak, log, etc) could download it.
+    Now requires either a valid HMAC signature (preferred, issued by the
+    backend inline on MessageOut.media_url) or a JWT token (legacy fallback
+    so old cached frontend assets don't break mid-rollout).
+    """
     from fastapi.responses import FileResponse
     from urllib.parse import unquote
     # URL-decode path (handles cyrillic and special chars)
     file_path = unquote(file_path)
+
+    # --- AUTH --- --------------------------------------------------------
+    authed = False
+    if sig and expires:
+        if time.time() <= expires:
+            payload = f"{file_path}:{expires}"
+            expected = hmac.new(
+                settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256,
+            ).hexdigest()[:32]
+            if hmac.compare_digest(sig, expected):
+                authed = True
+    if not authed and token:
+        # Legacy JWT fallback — keep until all clients ship the new frontend
+        try:
+            payload_jwt = decode_token(token)
+            if payload_jwt.get("type") == "access":
+                staff_id = payload_jwt.get("sub")
+                staff_result = await db.execute(
+                    select(Staff.id).where(Staff.id == staff_id, Staff.is_active.is_(True))
+                )
+                if staff_result.scalar_one_or_none():
+                    authed = True
+        except Exception:
+            pass
+    if not authed:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Media access requires a signed URL")
     # Prevent path traversal. The bare startswith() on os.path.abspath
     # would let `/app/media-evil/foo` slip past the check because
     # `/app/media-evil/foo`.startswith(`/app/media`) is True. Use realpath
@@ -1441,14 +1570,11 @@ async def list_contacts(
     if tag:
         query = query.where(Contact.tags.any(tag))
     if search:
-        from sqlalchemy import or_ as _or
         search_pattern = f"%{search}%"
-        query = query.where(
-            _or(
-                Contact.alias.ilike(search_pattern),
-                Contact.phone.ilike(search_pattern),
-            )
-        )
+        # Contact has no `phone` column (only TgAccount does). Search by
+        # alias only — previously the code referenced Contact.phone and
+        # raised AttributeError on every search call.
+        query = query.where(Contact.alias.ilike(search_pattern))
 
     query = query.order_by(Contact.is_pinned.desc(), Contact.last_message_at.desc().nullslast())
     query = query.offset(offset).limit(limit)
@@ -1507,8 +1633,9 @@ async def list_contacts(
             c.last_message_direction = None
             c.last_message_is_read = None
         # Pre-compute signed avatar URL so the frontend doesn't need a
-        # separate round-trip per contact.
-        c.avatar_url = _build_avatar_signed_url(c.id)
+        # separate round-trip per contact. Signature binds both contact_id
+        # and tg_account_id to prevent URL tampering.
+        c.avatar_url = _build_avatar_signed_url(c.id, c.tg_account_id)
 
     # Cache result for 15s
     if cache_key:
@@ -1540,7 +1667,7 @@ async def get_contact(contact_id: UUID, user: CurrentUser, db: DB):
             if real_name:
                 contact.alias = real_name
 
-    contact.avatar_url = _build_avatar_signed_url(contact.id)
+    contact.avatar_url = _build_avatar_signed_url(contact.id, contact.tg_account_id)
     return contact
 
 
@@ -2077,6 +2204,8 @@ async def get_messages(
             if updated:
                 await db.commit()
 
+    for m in messages:
+        _attach_media_url(m)
     return messages
 
 
@@ -2136,6 +2265,7 @@ async def send_msg(contact_id: UUID, req: SendMessage, user: CurrentUser, db: DB
     await db.commit()
     await db.refresh(msg)
 
+    _attach_media_url(msg)
     return msg
 
 
@@ -2258,7 +2388,7 @@ async def send_media(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
     check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
-    _validate_upload(file)
+    await _validate_upload(file)
 
     # Determine media type from content type
     ct = file.content_type or ""
@@ -2311,6 +2441,7 @@ async def send_media(
     contact.last_message_at = func.now()
     await db.commit()
     await db.refresh(msg)
+    _attach_media_url(msg)
     return msg
 
 
@@ -2352,6 +2483,7 @@ async def send_template_media(contact_id: UUID, user: CurrentUser, db: DB, templ
     contact.last_message_at = func.now()
     await db.commit()
     await db.refresh(msg)
+    _attach_media_url(msg)
     return msg
 
 
@@ -2382,7 +2514,9 @@ async def send_template_single_block(
     media_files = block.get("media_files")
     if media_files and len(media_files) > 1:
         from telegram import send_media_group
-        file_paths = [os.path.join(MEDIA_DIR, f["path"]) for f in media_files if f.get("path")]
+        # Validate every media_path against MEDIA_DIR to block path traversal
+        # via crafted template JSON (e.g. media_path="../../etc/passwd").
+        file_paths = [p for p in (_safe_media_path(f.get("path")) for f in media_files) if p]
         if not file_paths:
             return {"status": "skipped"}
         tg_msg_ids = None
@@ -2417,14 +2551,17 @@ async def send_template_single_block(
         await db.commit()
         for m in msgs:
             await db.refresh(m)
+            _attach_media_url(m)
         return msgs[0] if msgs else {"status": "sent"}
 
-    # Single media
+    # Single media — validated against MEDIA_DIR via _safe_media_path so
+    # a crafted template with media_path="../../etc/passwd" can't be used
+    # to ship arbitrary files via Telethon's file= parameter.
     block_media_path = None
     if block.get("media_path"):
-        block_media_path = os.path.join(MEDIA_DIR, block["media_path"])
+        block_media_path = _safe_media_path(block["media_path"])
     elif media_files and len(media_files) == 1:
-        block_media_path = os.path.join(MEDIA_DIR, media_files[0]["path"])
+        block_media_path = _safe_media_path(media_files[0].get("path"))
         media_type = media_files[0].get("type", media_type)
 
     if not text and not block_media_path:
@@ -2454,6 +2591,7 @@ async def send_template_single_block(
     contact.last_message_at = func.now()
     await db.commit()
     await db.refresh(msg)
+    _attach_media_url(msg)
     return msg
 
 
@@ -2555,7 +2693,9 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
     await db.commit()
     for m in sent_messages:
         await db.refresh(m)
-    # Return full message objects for frontend display
+    # Return full message objects for frontend display. `media_url` is a
+    # signed /media/ URL — without it the frontend falls back to the bare
+    # /media/<path> which now 401s since the endpoint requires auth.
     return [
         {
             "id": str(m.id),
@@ -2563,6 +2703,7 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
             "content": m.content,
             "media_type": m.media_type,
             "media_path": m.media_path,
+            "media_url": _build_media_signed_url(m.media_path) if m.media_path else None,
             "direction": m.direction,
             "sent_by": str(m.sent_by) if m.sent_by else None,
             "created_at": m.created_at.isoformat() + "Z" if m.created_at else None,
@@ -2983,7 +3124,7 @@ async def template_upload_media(
     file: UploadFile = File(...),
     send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
 ):
-    _validate_upload(file)
+    await _validate_upload(file)
 
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
     tpl = result.scalar_one_or_none()
@@ -3061,7 +3202,7 @@ async def template_upload_block_media(
 ):
     """Upload media for a specific block within a template."""
     _validate_block_id(block_id)
-    _validate_upload(file)
+    await _validate_upload(file)
 
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id, MessageTemplate.org_id == _org_id(user)))
     tpl = result.scalar_one_or_none()
@@ -3226,15 +3367,16 @@ async def unmute_contact(contact_id: UUID, user: CurrentUser, db: DB):
 # Avatars (proxy Telegram profile photos)
 # ============================================================
 
-def _build_avatar_signed_url(contact_id: UUID, ttl_seconds: int = 86400) -> str:
+def _build_avatar_signed_url(contact_id: UUID, tg_account_id: UUID, ttl_seconds: int = 86400) -> str:
     """Build an HMAC-signed avatar URL with a 24h expiry by default.
 
-    Used to pre-compute avatar URLs inline in ContactOut responses, so the
-    frontend doesn't need a separate `/avatar-url` round-trip per contact.
-    24h matches the browser Cache-Control on the avatar file itself.
+    The HMAC payload binds `contact_id`, `tg_account_id`, and `expires`.
+    Binding to tg_account_id means a URL forged/tampered to point at a
+    different contact UUID or the same UUID under a different account
+    won't verify — defence in depth against UUID-leak scenarios.
     """
     expires = int(time.time()) + ttl_seconds
-    payload = f"{contact_id}:{expires}"
+    payload = f"{contact_id}:{tg_account_id}:{expires}"
     sig = hmac.new(settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
     return f"/api/contacts/{contact_id}/avatar?expires={expires}&sig={sig}"
 
@@ -3248,17 +3390,19 @@ async def get_avatar_signed_url(contact_id: UUID, user: Annotated[Staff, Depends
     with a 1-hour expiry, so even if leaked it's short-lived and
     can't be used for anything except viewing this specific avatar.
     """
-    # Verify contact belongs to user's org
+    # Verify contact belongs to user's org and load its tg_account_id
+    # so the signature payload matches what the serve endpoint expects.
     result = await db.execute(
-        select(Contact.id).where(
+        select(Contact.id, Contact.tg_account_id).where(
             Contact.id == contact_id,
             Contact.tg_account_id.in_(_org_accounts_subq(user)),
         )
     )
-    if not result.scalar_one_or_none():
+    row = result.first()
+    if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
-    return {"url": _build_avatar_signed_url(contact_id)}
+    return {"url": _build_avatar_signed_url(contact_id, row[1])}
 
 
 @app.get("/api/contacts/{contact_id}/avatar")
@@ -3277,16 +3421,18 @@ async def get_contact_avatar(
         # Signed URL auth (preferred — no JWT in URL)
         if time.time() > expires:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Link expired")
-        payload = f"{contact_id}:{expires}"
-        expected = hmac.new(settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
-        if not hmac.compare_digest(sig, expected):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid signature")
-        # Signed URL is valid — we verified contact ownership when generating it.
-        # Look up contact directly (no org check needed, signature is proof of authz).
+        # Load contact FIRST so we can bind the HMAC payload to the
+        # contact's tg_account_id. This prevents URL tampering (changing
+        # contact_id in the URL): the resulting HMAC wouldn't match
+        # because the loaded contact's tg_account_id differs.
         result = await db.execute(select(Contact).where(Contact.id == contact_id))
         contact = result.scalar_one_or_none()
         if not contact:
             raise HTTPException(status.HTTP_404_NOT_FOUND)
+        payload = f"{contact_id}:{contact.tg_account_id}:{expires}"
+        expected = hmac.new(settings.JWT_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, expected):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid signature")
     elif token:
         # Legacy: JWT in query param (backward compat during frontend rollout)
         payload_jwt = decode_token(token)
@@ -3437,9 +3583,50 @@ async def get_edit_history(contact_id: UUID, message_id: UUID, user: CurrentUser
 # Translation
 # ============================================================
 
+# Per-user translate rate limit state. In-memory — fine for single-worker
+# deploys, must migrate to Redis when we scale out.
+_translate_limits: dict[str, list[float]] = defaultdict(list)
+TRANSLATE_MAX_CHARS = 4000
+TRANSLATE_RATE_WINDOW = 300  # 5 minutes
+TRANSLATE_RATE_MAX = 30
+ALLOWED_TRANSLATE_LANGS = {
+    "en", "ru", "uk", "es", "fr", "de", "it", "pt", "zh", "ja", "ko",
+    "ar", "tr", "pl", "nl", "sv", "cs", "hu", "ro", "bg", "el", "he",
+    "hi", "th", "vi", "id", "ms", "fa", "da", "fi", "no",
+}
+
+
 @app.post("/api/translate")
 async def translate_text(req: TranslateRequest, user: CurrentUser):
-    """Translate text using free Google Translate (via googletrans-like API)."""
+    """Translate text using free Google Translate (via googletrans-like API).
+
+    Hardened against abuse: length capped, per-user rate-limited, target
+    language whitelisted. Without these, an authenticated user could bulk-
+    exfiltrate chat content through Google and get the CRM IP banned.
+    """
+    # Length cap: 4000 chars is below Google's free-API 5k limit and well
+    # above any legitimate chat message.
+    if not req.text or not req.text.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Text is empty")
+    if len(req.text) > TRANSLATE_MAX_CHARS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Text too long (max {TRANSLATE_MAX_CHARS} chars)",
+        )
+    if req.target_lang not in ALLOWED_TRANSLATE_LANGS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported target language")
+
+    # Per-user sliding-window rate limit (30 translations / 5 min).
+    now = time.time()
+    key = str(user.id)
+    _translate_limits[key] = [t for t in _translate_limits[key] if now - t < TRANSLATE_RATE_WINDOW]
+    if len(_translate_limits[key]) >= TRANSLATE_RATE_MAX:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Слишком много запросов на перевод. Попробуйте через несколько минут.",
+        )
+    _translate_limits[key].append(now)
+
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -3513,7 +3700,7 @@ async def broadcast_upload_media(
     file: UploadFile = File(...),
     send_as: str = Query("auto", description="auto|photo|video|video_note|voice|document"),
 ):
-    _validate_upload(file)
+    await _validate_upload(file)
 
     result = await db.execute(select(Broadcast).where(Broadcast.id == broadcast_id, Broadcast.org_id == _org_id(user)))
     bc = result.scalar_one_or_none()

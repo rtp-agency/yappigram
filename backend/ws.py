@@ -41,7 +41,13 @@ class WSManager:
             self._redis = None
 
     async def _redis_listener(self):
-        """Listen for Redis pub/sub messages and forward to local WebSocket clients."""
+        """Listen for Redis pub/sub messages and forward to local WebSocket clients.
+
+        SECURITY: Every message MUST include `_org_id`. A message without it
+        is dropped (and logged) rather than broadcast to every connected
+        staff member. The previous `_local_broadcast_all` fallback was a
+        cross-org data-leak vector — one buggy publisher = full exposure.
+        """
         try:
             async for message in self._pubsub.listen():
                 if message["type"] != "message":
@@ -49,10 +55,14 @@ class WSManager:
                 try:
                     data = json.loads(message["data"])
                     org_id = data.pop("_org_id", None)
-                    if org_id:
-                        await self._local_broadcast_to_org(org_id, data)
-                    else:
-                        await self._local_broadcast_all(data)
+                    if not org_id:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Redis pubsub message missing _org_id — dropping to prevent "
+                            f"cross-org leak. Event type: {data.get('type', 'unknown')}"
+                        )
+                        continue
+                    await self._local_broadcast_to_org(org_id, data)
                 except Exception:
                     pass
         except Exception as e:
@@ -94,10 +104,6 @@ class WSManager:
         for staff_id in list(self._connections.keys()):
             if self._staff_org.get(staff_id) == org_id:
                 await self.send_to_staff(staff_id, event)
-
-    async def _local_broadcast_all(self, event: dict):
-        for staff_id in list(self._connections.keys()):
-            await self.send_to_staff(staff_id, event)
 
     async def broadcast_to_org(self, org_id: str | None, event: dict):
         if org_id is None:

@@ -479,18 +479,18 @@ const MessageBubble = memo(function MessageBubble({ m, isGroup, forwardMode, isF
           )}
           {m.media_type && m.media_type !== "sticker" && m.media_path && (
             <div className="mb-2">
-              {m.media_type === "photo" && <img src={mediaUrl(m.media_path)} alt="" loading="lazy" className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity" onClick={(e) => { e.stopPropagation(); onLightbox(mediaUrl(m.media_path!)); }} />}
-              {m.media_type === "video" && <video src={mediaUrl(m.media_path)} controls preload="none" className="rounded-xl max-w-full max-h-64" />}
-              {m.media_type === "video_note" && <div className="w-48 h-48 rounded-full overflow-hidden border-2 border-brand/30"><video src={mediaUrl(m.media_path)} controls preload="none" className="w-full h-full object-cover" style={{ borderRadius: "50%" }} /></div>}
-              {m.media_type === "voice" && <VoicePlayer src={mediaUrl(m.media_path)} direction={m.direction} />}
+              {m.media_type === "photo" && <img src={mediaUrl(m.media_path, m.media_url)} alt="" loading="lazy" className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity" onClick={(e) => { e.stopPropagation(); onLightbox(mediaUrl(m.media_path!, m.media_url)); }} />}
+              {m.media_type === "video" && <video src={mediaUrl(m.media_path, m.media_url)} controls preload="none" className="rounded-xl max-w-full max-h-64" />}
+              {m.media_type === "video_note" && <div className="w-48 h-48 rounded-full overflow-hidden border-2 border-brand/30"><video src={mediaUrl(m.media_path, m.media_url)} controls preload="none" className="w-full h-full object-cover" style={{ borderRadius: "50%" }} /></div>}
+              {m.media_type === "voice" && <VoicePlayer src={mediaUrl(m.media_path, m.media_url)} direction={m.direction} />}
               {m.media_type === "document" && (() => {
                 const fname = m.media_path!.split('/').pop() || '';
                 const ext = fname.includes('.') ? fname.split('.').pop()?.toLowerCase() || '' : '';
                 const isImg = isImageFile(m.media_path!);
                 return (isImg || !ext) ? (
-                  <img src={mediaUrl(m.media_path!)} alt="" loading="lazy" className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity" onClick={(e) => { e.stopPropagation(); onLightbox(mediaUrl(m.media_path!)); }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                  <img src={mediaUrl(m.media_path!, m.media_url)} alt="" loading="lazy" className="rounded-xl max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity" onClick={(e) => { e.stopPropagation(); onLightbox(mediaUrl(m.media_path!, m.media_url)); }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                 ) : (
-                  <a href={mediaUrl(m.media_path)} target="_blank" rel="noreferrer" download className="flex items-center gap-2 text-brand-light hover:underline">
+                  <a href={mediaUrl(m.media_path, m.media_url)} target="_blank" rel="noreferrer" download className="flex items-center gap-2 text-brand-light hover:underline">
                     <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                     {cleanFileName(m.media_path!)}
                   </a>
@@ -2061,10 +2061,10 @@ function ChatsContent() {
                                 {albumMsgs.map((am: any, i: number) => (
                                   <div key={am.id} className={`overflow-hidden ${itemSpan(i)}`}>
                                     {am.media_type === "video" ? (
-                                      <video src={mediaUrl(am.media_path)} controls preload="none" className="w-full h-full aspect-square object-cover" />
+                                      <video src={mediaUrl(am.media_path, (am as any).media_url)} controls preload="none" className="w-full h-full aspect-square object-cover" />
                                     ) : (
-                                      <img src={mediaUrl(am.media_path)} alt="" loading="lazy" className="w-full h-full aspect-square object-cover cursor-pointer hover:opacity-90"
-                                        onClick={() => setLightboxSrc(mediaUrl(am.media_path))} />
+                                      <img src={mediaUrl(am.media_path, (am as any).media_url)} alt="" loading="lazy" className="w-full h-full aspect-square object-cover cursor-pointer hover:opacity-90"
+                                        onClick={() => setLightboxSrc(mediaUrl(am.media_path, (am as any).media_url))} />
                                     )}
                                   </div>
                                 ))}
@@ -2619,7 +2619,7 @@ function ChatsContent() {
                     photos.length > 0 ? (
                       <div className="grid grid-cols-3 gap-1">
                         {photos.map((m) => (
-                          <img key={m.id} src={mediaUrl(m.media_path!)} alt="" className="w-full aspect-square object-cover rounded-lg cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setLightboxSrc(mediaUrl(m.media_path!))} />
+                          <img key={m.id} src={mediaUrl(m.media_path!, m.media_url)} alt="" className="w-full aspect-square object-cover rounded-lg cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setLightboxSrc(mediaUrl(m.media_path!, m.media_url))} />
                         ))}
                       </div>
                     ) : <p className="text-xs text-slate-500 text-center py-6">Нет фотографий</p>
@@ -2629,7 +2629,7 @@ function ChatsContent() {
                     videos.length > 0 ? (
                       <div className="space-y-2">
                         {videos.map((m) => (
-                          <video key={m.id} src={mediaUrl(m.media_path!)} controls preload="none" className="w-full rounded-lg" />
+                          <video key={m.id} src={mediaUrl(m.media_path!, m.media_url)} controls preload="none" className="w-full rounded-lg" />
                         ))}
                       </div>
                     ) : <p className="text-xs text-slate-500 text-center py-6">Нет видео</p>
@@ -2639,7 +2639,7 @@ function ChatsContent() {
                     files.length > 0 ? (
                       <div className="space-y-1">
                         {files.map((m) => (
-                          <a key={m.id} href={mediaUrl(m.media_path!)} target="_blank" rel="noreferrer" download
+                          <a key={m.id} href={mediaUrl(m.media_path!, m.media_url)} target="_blank" rel="noreferrer" download
                             className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-surface-border hover:border-brand/30 text-xs text-slate-300 hover:text-brand transition-colors">
                             <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                             <span className="truncate">{m.media_path!.split("/").pop()}</span>
@@ -2653,7 +2653,7 @@ function ChatsContent() {
                     voices.length > 0 ? (
                       <div className="space-y-2">
                         {voices.map((m) => (
-                          <VoicePlayer key={m.id} src={mediaUrl(m.media_path!)} direction={m.direction} />
+                          <VoicePlayer key={m.id} src={mediaUrl(m.media_path!, m.media_url)} direction={m.direction} />
                         ))}
                       </div>
                     ) : <p className="text-xs text-slate-500 text-center py-6">Нет голосовых</p>

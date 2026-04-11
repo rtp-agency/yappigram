@@ -527,7 +527,11 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             await db.commit()
             await db.refresh(msg)
 
-            # Broadcast to CRM (scoped to this account's org)
+            # Broadcast to CRM (scoped to this account's org). media_url is
+            # an HMAC-signed /media/ path — frontend renders it directly
+            # so no unauthenticated media access is required.
+            from app import _build_media_signed_url
+            signed_media_url = _build_media_signed_url(msg.media_path) if msg.media_path else None
             await ws_manager.broadcast_to_admins({
                 "type": "new_message",
                 "contact_id": str(contact.id),
@@ -537,6 +541,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                     "content": msg.content,
                     "media_type": msg.media_type,
                     "media_path": msg.media_path,
+                    "media_url": signed_media_url,
                     "forwarded_from_alias": msg.forwarded_from_alias,
                     "is_deleted": False,
                     "created_at": msg.created_at.isoformat() if msg.created_at else None,
@@ -810,6 +815,8 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
 
             # --- WS BROADCAST ---
             if contact.status == "approved":
+                from app import _build_media_signed_url
+                signed_media_url = _build_media_signed_url(msg.media_path) if msg.media_path else None
                 ws_event = {
                     "type": "new_message",
                     "contact_id": str(contact.id),
@@ -819,6 +826,7 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                         "content": msg.content,
                         "media_type": msg.media_type,
                         "media_path": msg.media_path,
+                        "media_url": signed_media_url,
                         "reply_to_msg_id": str(msg.reply_to_msg_id) if msg.reply_to_msg_id else None,
                         "reply_to_content_preview": msg.reply_to_content_preview,
                         "forwarded_from_alias": msg.forwarded_from_alias,

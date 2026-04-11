@@ -130,6 +130,11 @@ class MessageOut(BaseModel):
     content: str | None
     media_type: str | None
     media_path: str | None
+    # HMAC-signed URL for the media file. Populated server-side when the
+    # endpoint returns the message; frontend renders <img src={media_url}>
+    # directly and the media endpoint verifies the signature. Prevents
+    # unauthenticated access to /media/*.
+    media_url: str | None = None
     sent_by: UUID | None
     is_read: bool
     is_deleted: bool = False
