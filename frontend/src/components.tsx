@@ -44,6 +44,14 @@ function IconSettings({ className = "w-5 h-5" }: { className?: string }) {
   );
 }
 
+function IconShield({ className = "w-5 h-5" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  );
+}
+
 function IconSend({ className = "w-5 h-5" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -105,6 +113,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return false;
   });
   const [isOrgTeam, setIsOrgTeam] = useState(false);
+  const [isCrmAdmin, setIsCrmAdmin] = useState(false);
   const [dashLoading, setDashLoading] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
 
@@ -134,6 +143,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         const isOrg = !!(data?.postforge_org_id && !data.postforge_org_id.startsWith("personal_"));
         setIsOrgTeam(isOrg);
         setUserRole(data?.role || null);
+        setIsCrmAdmin(!!data?.is_crm_admin);
         try { sessionStorage.setItem("crm_is_org_team", isOrg ? "1" : "0"); } catch {}
       })
       .catch(() => {});
@@ -145,7 +155,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     ...(isOrgTeam && userRole !== "operator" ? [{ href: "/team", label: "Команда", icon: IconTeam }] : []),
     { href: "/stats", label: "Статистика", icon: IconStats },
     { href: "/settings", label: "Настройки", icon: IconSettings },
-  ], [isOrgTeam, userRole]);
+    ...(isCrmAdmin ? [{ href: "/admin", label: "Админ", icon: IconShield }] : []),
+  ], [isOrgTeam, userRole, isCrmAdmin]);
 
 
   useEffect(() => {

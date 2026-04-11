@@ -54,6 +54,9 @@ class StaffOut(BaseModel):
     # CRM token's postforge_user_id doesn't match the PostForge access_token's
     # user.id, the login page must clear and re-SSO.
     postforge_user_id: str | None = None
+    # Global CRM admin flag (synced from PostForge beta_features.crm_admin).
+    # Frontend uses it to show/hide the /admin menu item.
+    is_crm_admin: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

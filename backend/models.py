@@ -64,6 +64,13 @@ class Staff(Base):
     # Admin setting: show real contact names to operators (default: aliases only)
     show_real_names = Column(Boolean, default=True)
 
+    # CRM super-admin flag. Separate from the `role` field (which is per-org,
+    # auto-assigned by PostForge SSO). This flag is ONLY granted by an explicit
+    # toggle in the PostForge admin panel (beta_features.crm_admin on the
+    # PostForge User). Synced on every SSO login. A CRM super-admin can see
+    # the audit log, cross-org stats, and account debugging view.
+    is_crm_admin = Column(Boolean, default=False, nullable=False)
+
     assigned_contacts = relationship("Contact", back_populates="assigned_operator")
 
 

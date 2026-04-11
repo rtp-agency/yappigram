@@ -541,6 +541,25 @@ ContentManager = Annotated[Staff, Depends(require_role("super_admin", "admin", "
 SuperAdmin = Annotated[Staff, Depends(require_role("super_admin"))]
 
 
+async def require_crm_admin(user: CurrentUser) -> Staff:
+    """
+    Dependency for CRM admin panel endpoints. Only allows users with
+    `is_crm_admin = True`, which is synced from PostForge's
+    beta_features["crm_admin"] on every SSO login. Per-org roles
+    (super_admin/admin) are NOT sufficient — this is a global flag
+    granted ONLY by the PostForge admin panel toggle.
+    """
+    if not user.is_crm_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "CRM admin access required. Grant via PostForge admin panel.",
+        )
+    return user
+
+
+CrmAdminUser = Annotated[Staff, Depends(require_crm_admin)]
+
+
 def _org_id(user: Staff) -> str | None:
     """Get the effective org_id for data scoping."""
     return user.postforge_org_id
@@ -675,6 +694,9 @@ async def on_startup():
                 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS target_type VARCHAR;
                 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS metadata_json JSONB;
                 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS ip_address VARCHAR;
+                -- CRM super-admin flag (synced from PostForge beta_features.crm_admin)
+                ALTER TABLE staff ADD COLUMN IF NOT EXISTS is_crm_admin BOOLEAN NOT NULL DEFAULT false;
+                CREATE INDEX IF NOT EXISTS ix_staff_is_crm_admin ON staff(is_crm_admin) WHERE is_crm_admin = true;
                 -- Auto-approve all pending contacts (no approval flow)
                 UPDATE contacts SET status = 'approved' WHERE status = 'pending';
             EXCEPTION WHEN OTHERS THEN NULL;
@@ -1052,6 +1074,13 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
     pf_org_role = pf_user.get("organization_role")  # owner | admin | buyer | editor | custom
     pf_is_org_owner = pf_user.get("is_org_owner", False)
 
+    # CRM super-admin flag: explicitly granted via PostForge admin panel
+    # by adding "crm_admin" to the user's beta_features list. This is the
+    # ONLY way to become a CRM super-admin — the per-org `role` field is
+    # insufficient (it's auto-assigned by org ownership).
+    pf_beta_features = pf_user.get("beta_features") or []
+    is_crm_admin = "crm_admin" in pf_beta_features
+
     import hashlib
     # Effective org_id: team UUID or "personal_{user_id}" for solo
     effective_org_id = str(pf_org_id) if pf_org_id else f"personal_{pf_user_id}"
@@ -1113,12 +1142,13 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
             postforge_user_id=pf_user_id,
             postforge_org_id=effective_org_id,
             real_tg_id=pf_tg_id,  # Store real TG ID for Mini App auth
+            is_crm_admin=is_crm_admin,
         )
         db.add(user)
         await db.commit()
         await db.refresh(user)
     else:
-        # Sync role, name, and real_tg_id from PostForge on each login
+        # Sync role, name, real_tg_id, and is_crm_admin from PostForge on each login
         changed = False
         if user.role != crm_role:
             user.role = crm_role
@@ -1128,6 +1158,9 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
             changed = True
         if pf_tg_id and user.real_tg_id != pf_tg_id:
             user.real_tg_id = pf_tg_id
+            changed = True
+        if user.is_crm_admin != is_crm_admin:
+            user.is_crm_admin = is_crm_admin
             changed = True
         if changed:
             await db.commit()
@@ -4393,6 +4426,225 @@ async def websocket_endpoint(ws: WebSocket, ticket: str = Query(None), token: st
 @app.websocket("/crm/ws")
 async def websocket_endpoint_crm(ws: WebSocket, ticket: str = Query(None), token: str = Query(None)):
     await _handle_ws(ws, ticket=ticket, token=token)
+
+
+# ============================================================
+# CRM Admin panel — protected by is_crm_admin (PostForge beta flag)
+# ============================================================
+
+@app.get("/api/admin/me")
+async def admin_me(user: CrmAdminUser):
+    """Check if current user has CRM admin access. Used by frontend
+    to show/hide the admin menu item."""
+    return {
+        "id": str(user.id),
+        "name": user.name,
+        "is_crm_admin": user.is_crm_admin,
+        "postforge_user_id": user.postforge_user_id,
+    }
+
+
+@app.get("/api/admin/audit")
+async def admin_audit_log(
+    user: CrmAdminUser,
+    db: DB,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    action: str | None = Query(None, description="Filter by action name"),
+    staff_id: UUID | None = Query(None, description="Filter by actor staff"),
+    target_type: str | None = Query(None, description="Filter by target type"),
+    since: str | None = Query(None, description="ISO timestamp — entries after this"),
+):
+    """
+    Paginated audit log. Returns entries newest-first with actor info.
+
+    Admin sees audit logs for ALL orgs — this is by design (CRM admin
+    is a global role, not org-scoped).
+    """
+    from sqlalchemy import desc as sa_desc
+
+    query = select(AuditLog, Staff.name, Staff.postforge_org_id).join(
+        Staff, Staff.id == AuditLog.staff_id
+    )
+
+    if action:
+        query = query.where(AuditLog.action == action)
+    if staff_id:
+        query = query.where(AuditLog.staff_id == staff_id)
+    if target_type:
+        query = query.where(AuditLog.target_type == target_type)
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00")).replace(tzinfo=None)
+            query = query.where(AuditLog.created_at >= since_dt)
+        except ValueError:
+            pass
+
+    query = query.order_by(sa_desc(AuditLog.created_at)).limit(limit).offset(offset)
+    result = await db.execute(query)
+
+    entries = []
+    for log, actor_name, actor_org in result.all():
+        entries.append({
+            "id": str(log.id),
+            "action": log.action,
+            "actor_id": str(log.staff_id),
+            "actor_name": actor_name,
+            "actor_org": actor_org,
+            "target_id": log.target_id,
+            "target_type": log.target_type,
+            "target_contact_id": str(log.target_contact_id) if log.target_contact_id else None,
+            "metadata": log.metadata_json,
+            "ip_address": log.ip_address,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        })
+
+    # Total count for pagination
+    count_q = select(func.count(AuditLog.id))
+    if action:
+        count_q = count_q.where(AuditLog.action == action)
+    if staff_id:
+        count_q = count_q.where(AuditLog.staff_id == staff_id)
+    if target_type:
+        count_q = count_q.where(AuditLog.target_type == target_type)
+    total = (await db.execute(count_q)).scalar() or 0
+
+    return {"entries": entries, "total": total, "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/audit/actions")
+async def admin_audit_actions(user: CrmAdminUser, db: DB):
+    """Distinct action names from audit log — for filter dropdown."""
+    result = await db.execute(select(AuditLog.action).distinct())
+    return {"actions": sorted([row[0] for row in result.all() if row[0]])}
+
+
+@app.get("/api/admin/stats")
+async def admin_stats(user: CrmAdminUser, db: DB):
+    """
+    Critical CRM metrics across all orgs. Used by the admin dashboard
+    to spot problems (stuck broadcasts, dead accounts, flood patterns).
+    """
+    from datetime import timedelta
+
+    now = datetime.utcnow()
+    day_ago = now - timedelta(days=1)
+    week_ago = now - timedelta(days=7)
+
+    # Counts
+    total_staff = (await db.execute(select(func.count(Staff.id)).where(Staff.is_active.is_(True)))).scalar() or 0
+    total_accounts = (await db.execute(select(func.count(TgAccount.id)).where(TgAccount.is_active.is_(True)))).scalar() or 0
+    total_contacts = (await db.execute(select(func.count(Contact.id)))).scalar() or 0
+    total_messages = (await db.execute(select(func.count(Message.id)))).scalar() or 0
+
+    messages_24h = (await db.execute(
+        select(func.count(Message.id)).where(Message.created_at >= day_ago)
+    )).scalar() or 0
+    messages_7d = (await db.execute(
+        select(func.count(Message.id)).where(Message.created_at >= week_ago)
+    )).scalar() or 0
+
+    # Broadcasts
+    broadcasts_running = (await db.execute(
+        select(func.count(Broadcast.id)).where(Broadcast.status == "running")
+    )).scalar() or 0
+    broadcasts_completed_24h = (await db.execute(
+        select(func.count(Broadcast.id)).where(
+            Broadcast.status == "completed",
+            Broadcast.completed_at >= day_ago,
+        )
+    )).scalar() or 0
+
+    # Audit events in last 24h
+    audit_24h = (await db.execute(
+        select(func.count(AuditLog.id)).where(AuditLog.created_at >= day_ago)
+    )).scalar() or 0
+
+    # Telethon clients currently connected (in-memory)
+    from telegram import _clients as _tg_clients
+    connected_clients = sum(1 for c in _tg_clients.values() if c.is_connected())
+
+    return {
+        "staff": {"total_active": total_staff, "crm_admins": await _count_crm_admins(db)},
+        "accounts": {"total_active": total_accounts, "currently_connected": connected_clients},
+        "contacts": {"total": total_contacts},
+        "messages": {
+            "total": total_messages,
+            "last_24h": messages_24h,
+            "last_7d": messages_7d,
+        },
+        "broadcasts": {
+            "running": broadcasts_running,
+            "completed_24h": broadcasts_completed_24h,
+        },
+        "audit": {"events_24h": audit_24h},
+    }
+
+
+async def _count_crm_admins(db) -> int:
+    """Count all staff with is_crm_admin = True."""
+    result = await db.execute(
+        select(func.count(Staff.id)).where(
+            Staff.is_crm_admin.is_(True),
+            Staff.is_active.is_(True),
+        )
+    )
+    return result.scalar() or 0
+
+
+@app.get("/api/admin/accounts")
+async def admin_all_accounts(user: CrmAdminUser, db: DB):
+    """All TG accounts across all orgs — for debugging connection issues."""
+    from telegram import _clients as _tg_clients
+
+    result = await db.execute(
+        select(TgAccount, Staff.name, Staff.postforge_org_id).outerjoin(
+            Staff, Staff.postforge_org_id == TgAccount.org_id
+        ).where(TgAccount.is_active.is_(True))
+    )
+
+    # Deduplicate by account.id (the join can produce duplicates
+    # when multiple staff share the same org)
+    seen = set()
+    accounts = []
+    for acc, staff_name, staff_org in result.all():
+        if acc.id in seen:
+            continue
+        seen.add(acc.id)
+        client = _tg_clients.get(acc.id)
+        accounts.append({
+            "id": str(acc.id),
+            "phone": acc.phone,
+            "display_name": acc.display_name,
+            "org_id": acc.org_id,
+            "connected": bool(client and client.is_connected()),
+            "created_at": acc.created_at.isoformat() if acc.created_at else None,
+            "disconnected_at": acc.disconnected_at.isoformat() if acc.disconnected_at else None,
+        })
+
+    return {"accounts": accounts, "total": len(accounts)}
+
+
+@app.get("/api/admin/staff")
+async def admin_all_staff(user: CrmAdminUser, db: DB):
+    """All active staff across orgs with their roles + admin flags."""
+    result = await db.execute(
+        select(Staff).where(Staff.is_active.is_(True)).order_by(
+            Staff.is_crm_admin.desc(), Staff.name
+        )
+    )
+    staff_list = []
+    for s in result.scalars().all():
+        staff_list.append({
+            "id": str(s.id),
+            "name": s.name,
+            "role": s.role,
+            "org_id": s.postforge_org_id,
+            "postforge_user_id": s.postforge_user_id,
+            "is_crm_admin": s.is_crm_admin,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        })
+    return {"staff": staff_list, "total": len(staff_list)}
 
 
 # ============================================================
