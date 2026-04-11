@@ -527,7 +527,11 @@ def _build_media_signed_url(media_path: str, ttl_seconds: int = 86400) -> str:
 async def serve_media(
     file_path: str,
     request: Request,
-    db: DB,
+    # NOTE: the `DB = Annotated[...]` alias is declared further down in this
+    # file — can't use it here without a forward-reference hack, so we spell
+    # the dependency out explicitly. Same signature contract, no behavior
+    # difference.
+    db: Annotated[AsyncSession, Depends(get_db)],
     expires: int = Query(0),
     sig: str = Query(""),
     token: str = Query(""),  # Legacy: JWT in query, still accepted during rollout
