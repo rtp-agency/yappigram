@@ -1055,6 +1055,49 @@ async def _try_reconnect_inner(account_id: UUID) -> TelegramClient | None:
         return None
 
 
+async def set_chat_mute(account_id: UUID, tg_id: int, muted: bool) -> None:
+    """Toggle Telegram's native per-peer mute for a chat via Telethon.
+
+    Sends UpdateNotifySettingsRequest with `mute_until` set to the far
+    future (mute forever) or 0 (unmute). This affects the real Telegram
+    state — on the next _do_sync_dialogs run, the Dialog's notify_settings
+    will reflect the change and Contact.is_muted will stay consistent.
+
+    Raises ValueError if the account isn't connected or the peer can't
+    be resolved.
+    """
+    from telethon.tl.functions.account import UpdateNotifySettingsRequest
+    from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
+
+    client = _clients.get(account_id)
+    if not client:
+        client = await _try_reconnect(account_id)
+    if not client:
+        raise ValueError("Telegram-аккаунт не подключён. Проверьте подключение в настройках.")
+
+    peer = await client.get_input_entity(tg_id)
+    # "Mute forever" = int32 max (2^31 - 1). Unmute = 0 + explicit silent/show
+    # overrides so the peer doesn't inherit a "mute new chats by default"
+    # global preference and stay effectively muted.
+    if muted:
+        settings = InputPeerNotifySettings(mute_until=2 ** 31 - 1, silent=True)
+    else:
+        settings = InputPeerNotifySettings(mute_until=0, silent=False, show_previews=True)
+    try:
+        await client(UpdateNotifySettingsRequest(
+            peer=InputNotifyPeer(peer=peer),
+            settings=settings,
+        ))
+    except FloodWaitError as e:
+        wait = min(e.seconds, 60)
+        print(f"[FLOOD] set_chat_mute rate limited, waiting {wait}s", flush=True)
+        await asyncio.sleep(wait)
+        await client(UpdateNotifySettingsRequest(
+            peer=InputNotifyPeer(peer=peer),
+            settings=settings,
+        ))
+
+
 async def send_message(
     account_id: UUID,
     tg_id: int,

@@ -3150,11 +3150,15 @@ async def unarchive_contact(contact_id: UUID, user: CurrentUser, db: DB):
     return {"status": "unarchived"}
 
 
-@app.post("/api/contacts/{contact_id}/mute")
-async def mute_contact(contact_id: UUID, user: CurrentUser, db: DB):
-    """CRM-local mute toggle. Independent of Telegram's native mute.
-    Effective mute state (is_muted OR crm_muted) suppresses in-CRM toasts.
+async def _set_contact_mute(contact_id: UUID, user: Staff, db, muted: bool) -> dict:
+    """Shared body for /mute and /unmute. Resolves the contact, pushes the
+    new state to Telegram via Telethon, then mirrors it to `Contact.is_muted`.
+
+    Raises 404 if the contact isn't in the user's org, 400 if the Telegram
+    call fails (e.g. account disconnected). `crm_muted` is kept in sync with
+    `is_muted` to avoid two-source drift — effectively a single-layer mute.
     """
+    from telegram import set_chat_mute
     result = await db.execute(select(Contact).where(
         Contact.id == contact_id,
         Contact.tg_account_id.in_(_org_accounts_subq(user)),
@@ -3162,28 +3166,38 @@ async def mute_contact(contact_id: UUID, user: CurrentUser, db: DB):
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
-    contact.crm_muted = True
+
+    try:
+        await set_chat_mute(contact.tg_account_id, contact.real_tg_id, muted)
+    except ValueError as e:
+        # Account not connected
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except Exception as e:
+        # Telethon / network / flood
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Telegram rejected the mute change: {e}")
+
+    contact.is_muted = muted
+    contact.crm_muted = muted
     await db.commit()
     await cache_invalidate(f"contacts:{_org_id(user)}:*")
-    return {"status": "muted"}
+    return {"status": "muted" if muted else "unmuted"}
+
+
+@app.post("/api/contacts/{contact_id}/mute")
+async def mute_contact(contact_id: UUID, user: CurrentUser, db: DB):
+    """Mute a chat in the user's native Telegram client (via Telethon)
+    and mirror the state to Contact.is_muted. Silences in-CRM toasts.
+    """
+    return await _set_contact_mute(contact_id, user, db, muted=True)
 
 
 @app.post("/api/contacts/{contact_id}/unmute")
 async def unmute_contact(contact_id: UUID, user: CurrentUser, db: DB):
-    """Clear the CRM-local mute. Does NOT unmute in native Telegram —
-    `is_muted` stays whatever Telegram reports on the next sync cycle.
+    """Unmute a chat in native Telegram + clear Contact.is_muted.
+    Works regardless of whether the chat was originally muted from CRM
+    or from the Telegram app — the CRM now drives the real TG state.
     """
-    result = await db.execute(select(Contact).where(
-        Contact.id == contact_id,
-        Contact.tg_account_id.in_(_org_accounts_subq(user)),
-    ))
-    contact = result.scalar_one_or_none()
-    if not contact:
-        raise HTTPException(status.HTTP_404_NOT_FOUND)
-    contact.crm_muted = False
-    await db.commit()
-    await cache_invalidate(f"contacts:{_org_id(user)}:*")
-    return {"status": "unmuted"}
+    return await _set_contact_mute(contact_id, user, db, muted=False)
 
 
 # ============================================================
