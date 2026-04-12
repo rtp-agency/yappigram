@@ -4952,13 +4952,18 @@ async def report_new_chats(
     org = _org_id(user)
     org_accounts = select(TgAccount.id).where(TgAccount.org_id == org)
 
-    # Subquery: (contact_id, first_message_at) for every contact that has
-    # at least one message. Backed by ix_messages_contact_created.
+    # Subquery: first INCOMING message per contact. "New chat" means someone
+    # wrote TO YOU — not an old contact whose history was imported during
+    # dialog sync. Without the direction filter, sync-imported contacts
+    # whose oldest messages happen to fall in the date range (because only
+    # the last ~200 messages are synced, not the full history) produce
+    # inflated counts like "371 new chats today".
     first_msg_sub = (
         select(
             Message.contact_id.label("contact_id"),
             func.min(Message.created_at).label("first_at"),
         )
+        .where(Message.direction == "incoming")
         .group_by(Message.contact_id)
         .subquery()
     )

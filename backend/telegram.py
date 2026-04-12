@@ -1305,6 +1305,43 @@ async def send_message(
         print(f"[FLOOD] Rate limited, waiting {wait}s before retry", flush=True)
         await asyncio.sleep(wait)
         result = await _do_send()
+    except ValueError as e:
+        # "Could not find the input entity for PeerUser(user_id=...)"
+        # Telethon's entity cache doesn't have the access_hash for this user.
+        # One-shot fix: warm up the cache via iter_dialogs and retry once.
+        if "Could not find the input entity" in str(e):
+            print(f"[SEND] Entity cache miss for tg_id={tg_id}, warming up via iter_dialogs...", flush=True)
+            try:
+                _warmed = 0
+                async for _ in client.iter_dialogs(limit=None):
+                    _warmed += 1
+                print(f"[SEND] Warmed {_warmed} dialogs, retrying send...", flush=True)
+                result = await _do_send()
+            except Exception as retry_err:
+                raise ValueError(
+                    f"Контакт недоступен (Telegram не может найти получателя). "
+                    f"Возможно, он удалил свой аккаунт или заблокировал бота."
+                ) from retry_err
+        else:
+            raise
+    except Exception as e:
+        # Catch Telethon-specific errors and convert to user-friendly messages.
+        err_name = type(e).__name__
+        err_str = str(e)
+        if err_name == "InputUserDeactivatedError" or "InputUserDeactivatedError" in err_str:
+            raise ValueError(
+                "Аккаунт получателя удалён или деактивирован в Telegram. "
+                "Сообщение не может быть доставлено."
+            )
+        if err_name == "PeerFloodError" or "PEER_FLOOD" in err_str:
+            raise ValueError(
+                "Telegram временно ограничил отправку сообщений с этого аккаунта. "
+                "Подождите несколько минут и попробуйте снова."
+            )
+        if err_name == "UserBannedInChannelError":
+            raise ValueError("Этот аккаунт заблокирован в канале/группе получателя.")
+        # Unknown Telethon error — re-raise as-is so it surfaces in Sentry
+        raise
     # Mark this tg_msg_id as CRM-originated so the outgoing listener
     # skips it without sleeping.
     _mark_crm_sent(account_id, result.id)

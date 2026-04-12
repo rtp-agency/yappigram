@@ -966,8 +966,11 @@ function ChatsContent() {
       } else if (isValid) {
         setFilterAccountId(stored);
       } else {
-        setFilterAccountId(null);
-        sessionStorage.removeItem("crm_selected_account");
+        // Default to first account instead of showing ALL accounts mixed.
+        // Previously filterAccountId was set to null here, which caused
+        // fetchContacts to load every account's chats on first open.
+        setFilterAccountId(rawAccs[0].id);
+        sessionStorage.setItem("crm_selected_account", rawAccs[0].id);
       }
       setAccountsReady(true);
     }).catch((err) => {
