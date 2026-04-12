@@ -161,10 +161,10 @@ const VideoNote = memo(function VideoNote({ src, direction }: { src: string; dir
   };
 
   return (
-    <div className="mb-2 flex flex-col items-center gap-1.5" style={{ maxWidth: 240 }}>
+    <div className="mb-2 flex flex-col items-center gap-1.5" style={{ maxWidth: 300 }}>
       {/* Circle video — click toggles play/pause */}
       <div
-        className="relative w-48 h-48 rounded-full overflow-hidden cursor-pointer border-2 border-brand/20 shrink-0"
+        className="relative w-60 h-60 rounded-full overflow-hidden cursor-pointer border-2 border-brand/20 shrink-0"
         onClick={toggle}
         style={{ clipPath: "circle(50%)" }}
       >
@@ -199,7 +199,7 @@ const VideoNote = memo(function VideoNote({ src, direction }: { src: string; dir
       </div>
 
       {/* Controls strip below the circle */}
-      <div className="w-48 flex items-center gap-2">
+      <div className="w-60 flex items-center gap-2">
         <button
           onClick={toggle}
           className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-colors ${
