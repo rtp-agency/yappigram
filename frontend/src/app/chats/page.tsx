@@ -600,7 +600,23 @@ const MessageBubble = memo(function MessageBubble({ m, isGroup, forwardMode, isF
               Deleted in Telegram
             </div>
           )}
-          {m.media_type === "sticker" && <div className={`text-xs italic ${m.direction === "outgoing" ? "text-white/50" : "text-slate-400"}`}>Стикер {m.content || ""}</div>}
+          {m.media_type === "sticker" && (
+            m.media_path ? (() => {
+              const ext = (m.media_path || "").split(".").pop()?.toLowerCase();
+              const url = mediaUrl(m.media_path!, m.media_url);
+              if (ext === "webm") {
+                // Animated video sticker
+                return <video src={url} autoPlay loop muted playsInline className="max-w-[200px] max-h-[200px]" />;
+              }
+              if (ext === "webp" || ext === "png" || ext === "jpg") {
+                // Static sticker
+                return <img src={url} alt={m.content || "sticker"} loading="lazy" className="max-w-[200px] max-h-[200px]" />;
+              }
+              // .tgs (Lottie) — fallback to emoji
+              return <div className="text-4xl py-2">{m.content || "🔲"}</div>;
+            })()
+            : <div className="text-4xl py-2">{m.content || "🔲"}</div>
+          )}
           {m.media_type && m.media_type !== "sticker" && !m.media_path && (
             <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 text-xs text-slate-400">
               <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-400 rounded-full animate-spin" /> Загрузка медиа...
