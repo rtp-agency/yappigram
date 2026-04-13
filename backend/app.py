@@ -2620,14 +2620,20 @@ async def send_template_single_block(
 
 @app.post("/api/messages/{contact_id}/send-template-blocks")
 async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, template_id: UUID = Query(...)):
-    """Send all blocks at once (no delays). Use send-template-block for individual blocks with client delays."""
+    """Send all template blocks as a background task.
+
+    Returns immediately with status=sending. The backend handles inter-
+    block delays server-side and broadcasts a WS event per block, so the
+    CRM UI updates in real-time even if the user navigates away.
+
+    Previous design ran delays in the browser (setTimeout). When the user
+    switched chats mid-script, the browser throttled the timers and the
+    remaining blocks never sent.
+    """
     contact = await _get_contact_with_access(contact_id, user, db)
     if contact.status != "approved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Contact not approved")
 
-    # Pre-check: block sends bulk templates that would exceed the flood limit.
-    # We don't call check_tg_send_limit inside the loop because it would
-    # reject mid-send and leave a partial template delivery.
     check_tg_send_limit(str(contact.tg_account_id), contact.real_tg_id)
 
     result = await db.execute(select(MessageTemplate).where(MessageTemplate.id == template_id))
@@ -2639,104 +2645,107 @@ async def send_template_blocks(contact_id: UUID, user: CurrentUser, db: DB, temp
     if not blocks:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Template has no blocks")
 
-    sent_messages = []
+    # Pre-validate all media paths before spawning the background task.
     media_root = os.path.realpath(MEDIA_DIR)
+    validated_blocks: list[dict] = []
     for i, block in enumerate(blocks):
-        block_media_path = None
         raw_media = block.get("media_path")
+        resolved = None
         if raw_media:
-            # Templates store media_path as user-controlled JSON. Without
-            # this guard a crafted template ("../../../etc/passwd") would
-            # let send_message() read arbitrary files via Telethon's file
-            # parameter and ship them out to a Telegram chat.
-            #
-            # Resolve the candidate path against MEDIA_DIR, then verify
-            # the result is still inside MEDIA_DIR via realpath. Reject
-            # anything that escapes — also rejects symlinks pointing
-            # outside the directory tree.
             candidate = os.path.realpath(os.path.join(media_root, raw_media))
             if not candidate.startswith(media_root + os.sep) and candidate != media_root:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"Block {i+1}: invalid media path",
-                )
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Block {i+1}: invalid media path")
             if not os.path.isfile(candidate):
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"Block {i+1}: media file not found",
-                )
-            block_media_path = candidate
-
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Block {i+1}: media file not found")
+            resolved = candidate
         text = block.get("content") or None
         media_type = block.get("media_type") or block.get("type")
         if media_type == "text":
             media_type = None
+        if text or resolved:
+            validated_blocks.append({
+                "text": text,
+                "media_type": media_type,
+                "media_path_raw": raw_media,
+                "media_path_resolved": resolved,
+                "delay_after": block.get("delay_after", 0),
+            })
 
-        # Skip empty blocks (no text, no media)
-        if not text and not block_media_path:
-            continue
+    if not validated_blocks:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Template has no sendable blocks")
 
-        # Retry on SQLite lock (Telethon session file contention)
-        tg_msg_id = None
-        last_err = None
-        for attempt in range(5):
+    # Snapshot values needed by the background task. The DB session will
+    # be closed by the time the task runs, so we copy everything.
+    contact_id_val = contact.id
+    tg_account_id = contact.tg_account_id
+    real_tg_id = contact.real_tg_id
+    user_id = user.id
+    org_id = _org_id(user)
+
+    async def _bg_send():
+        """Background: send blocks one by one with delays + WS per block."""
+        for i, vb in enumerate(validated_blocks):
+            # Inter-block delay (from template JSON)
+            if i > 0:
+                delay = validated_blocks[i - 1].get("delay_after", 0) or 0
+                if delay > 0:
+                    await asyncio.sleep(min(delay, 60))  # cap at 60s
+
             try:
                 tg_msg_id = await send_message(
-                    contact.tg_account_id, contact.real_tg_id,
-                    text=text,
-                    file_path=block_media_path,
-                    media_type=media_type if block_media_path else None,
+                    tg_account_id, real_tg_id,
+                    text=vb["text"],
+                    file_path=vb["media_path_resolved"],
+                    media_type=vb["media_type"] if vb["media_path_resolved"] else None,
                 )
-                break
             except Exception as e:
-                last_err = e
-                if "database is locked" in str(e) and attempt < 4:
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                    continue
-                raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Block {i+1} failed: {e}")
-        if tg_msg_id is None:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Block {i+1} failed after retries: {last_err}")
+                print(f"[TEMPLATE-BG] Block {i+1} failed for contact {contact_id_val}: {e}")
+                continue  # Don't abort the whole chain on one failure
 
-        msg = Message(
-            contact_id=contact.id,
-            tg_message_id=tg_msg_id,
-            direction="outgoing",
-            content=text,
-            media_type=media_type if block_media_path else None,
-            media_path=block.get("media_path"),
-            sent_by=user.id,
-        )
-        db.add(msg)
-        sent_messages.append(msg)
-        # Gap between sends to let Telethon SQLite session flush
-        if i < len(blocks) - 1:
-            await asyncio.sleep(1.0)
+            # Save to DB + broadcast
+            async with async_session() as bg_db:
+                try:
+                    msg = Message(
+                        contact_id=contact_id_val,
+                        tg_message_id=tg_msg_id,
+                        direction="outgoing",
+                        content=vb["text"],
+                        media_type=vb["media_type"] if vb["media_path_resolved"] else None,
+                        media_path=vb["media_path_raw"],
+                        sent_by=user_id,
+                    )
+                    bg_db.add(msg)
+                    # Update contact preview
+                    c_row = await bg_db.get(Contact, contact_id_val)
+                    if c_row:
+                        c_row.last_message_at = func.now()
+                        _touch_contact_preview(c_row, vb["text"], vb["media_type"], "outgoing")
+                    await bg_db.commit()
+                    await bg_db.refresh(msg)
 
-    contact.last_message_at = func.now()
-    # Use the last non-empty block as the preview.
-    if sent_messages:
-        last_m = sent_messages[-1]
-        _touch_contact_preview(contact, last_m.content, last_m.media_type, "outgoing")
-    await db.commit()
-    for m in sent_messages:
-        await db.refresh(m)
-    # Return full message objects for frontend display. `media_url` is a
-    # signed /media/ URL — without it the frontend falls back to the bare
-    # /media/<path> which now 401s since the endpoint requires auth.
-    return [
-        {
-            "id": str(m.id),
-            "tg_message_id": m.tg_message_id,
-            "content": m.content,
-            "media_type": m.media_type,
-            "media_path": m.media_path,
-            "media_url": _build_media_signed_url(m.media_path) if m.media_path else None,
-            "direction": m.direction,
-            "sent_by": str(m.sent_by) if m.sent_by else None,
-            "created_at": m.created_at.isoformat() + "Z" if m.created_at else None,
-        }
-        for m in sent_messages
-    ]
+                    # WS broadcast so open CRM tabs see the message appear
+                    signed_media = _build_media_signed_url(msg.media_path) if msg.media_path else None
+                    await ws_manager.broadcast_to_admins({
+                        "type": "new_message",
+                        "contact_id": str(contact_id_val),
+                        "message": {
+                            "id": str(msg.id),
+                            "tg_message_id": msg.tg_message_id,
+                            "direction": "outgoing",
+                            "content": msg.content,
+                            "media_type": msg.media_type,
+                            "media_path": msg.media_path,
+                            "media_url": signed_media,
+                            "is_deleted": False,
+                            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                        },
+                    }, org_id=org_id)
+                except Exception as e:
+                    print(f"[TEMPLATE-BG] DB/WS error block {i+1}: {e}")
+                    await bg_db.rollback()
+
+    asyncio.create_task(_bg_send())
+    return {"status": "sending", "blocks": len(validated_blocks)}
 
 
 @app.patch("/api/messages/{contact_id}/read")
