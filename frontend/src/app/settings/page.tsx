@@ -102,6 +102,9 @@ function TelegramSection() {
   const [password2fa, setPassword2fa] = useState("");
   const [step, setStep] = useState<"idle" | "code_sent">("idle");
   const [loading, setLoading] = useState(false);
+  // Confirm-modal state — users should explicitly acknowledge that
+  // linking a number will debit their METRA AI balance for the first month.
+  const [confirmCharge, setConfirmCharge] = useState(false);
 
   const loadData = () => {
     api("/api/tg/status").then((res: any) => {
@@ -115,7 +118,19 @@ function TelegramSection() {
 
   useEffect(() => { loadData(); }, []);
 
+  // When billing is on, surface a modal so the user can't blindly click
+  // past a 45-coin charge. When it's off (free period), skip straight to
+  // sending the Telegram code — no charge is going to happen.
+  const handleConnectClick = () => {
+    if (billingInfo?.billing_enabled) {
+      setConfirmCharge(true);
+    } else {
+      void connect();
+    }
+  };
+
   const connect = async () => {
+    setConfirmCharge(false);
     setLoading(true);
     try {
       await api("/api/tg/connect", { method: "POST", body: JSON.stringify({ phone }) });
@@ -216,7 +231,7 @@ function TelegramSection() {
               setPhone(digits.startsWith("+") ? digits : "+" + digits);
             }} placeholder="+79001234567" />
             <Button
-              onClick={connect}
+              onClick={handleConnectClick}
               disabled={loading || !phone || (billingInfo?.billing_enabled && !billingInfo?.can_afford_new)}
             >
               {loading ? "Отправка кода..." :
@@ -236,6 +251,59 @@ function TelegramSection() {
           </>
         )}
       </div>
+
+      {/* Explicit charge-confirmation modal.
+          Shown only when billing_enabled=true so the user can't silently
+          drop 45 coins by clicking "Подключить". Skipped during the free
+          period when no debit would actually happen. */}
+      {confirmCharge && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setConfirmCharge(false)}
+        >
+          <div
+            className="bg-surface-card border border-surface-border rounded-2xl max-w-md w-full p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+                <svg className="w-5 h-5 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-text">Подтвердите оплату</h3>
+            </div>
+
+            <p className="text-sm text-text-muted mb-4">
+              Подключение номера <b className="text-text">{phone}</b> к CRM спишет с вашего баланса METRA AI:
+            </p>
+
+            <div className="flex items-baseline justify-between bg-dark-900/40 border border-surface-border rounded-xl px-4 py-3 mb-4">
+              <span className="text-sm text-text-muted">Стоимость</span>
+              <span className="text-xl font-bold text-amber-400">
+                {Math.round(Number(billingInfo?.cost_per_month || 45))} coins
+              </span>
+            </div>
+
+            <div className="text-xs text-text-muted space-y-1 mb-5">
+              <p>· Подписка на 30 дней с автопродлением</p>
+              <p>· После подключения средства не возвращаются</p>
+              <p>· Ваш текущий баланс: <b className="text-text">{billingInfo?.balance || "0"} coins</b></p>
+            </div>
+
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setConfirmCharge(false)}>
+                Отмена
+              </Button>
+              <Button onClick={connect} disabled={loading}>
+                {loading ? "Подтверждение..." : "Да, списать и подключить"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
