@@ -1122,11 +1122,15 @@ function TimezoneSection() {
 function AdminSettingsSection() {
   const [accounts, setAccounts] = useState<TgStatusAccount[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
+  const [tags, setTags] = useState<any[]>([]);
+  const [templates, setTemplates] = useState<any[]>([]);
 
   useEffect(() => {
     fetchTgStatus().then((accs) => {
       setAccounts(accs.filter((a) => a.is_active !== false));
     }).catch(console.error);
+    api("/api/tags").then((r: any) => setTags(r || [])).catch(() => {});
+    api("/api/templates").then((r: any) => setTemplates(r || [])).catch(() => {});
   }, []);
 
   // Fallback: if no accounts loaded from new endpoint, use old global setting
@@ -1160,6 +1164,7 @@ function AdminSettingsSection() {
   };
 
   return (
+    <>
     <section className="animate-fade-in">
       <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
         <svg className="w-5 h-5 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1251,6 +1256,7 @@ function AdminSettingsSection() {
         <AutoSettingsCard key={acc.id} account={acc} allTags={tags} templates={templates} />
       ))}
     </section>
+    </>
   );
 }
 
@@ -1259,7 +1265,7 @@ function AdminSettingsSection() {
 
 function AutoSettingsCard({ account, allTags, templates }: {
   account: { id: string; display_name: string | null; phone: string };
-  allTags: { id: string; name: string; color: string }[];
+  allTags: { id: string; name: string; color: string; tg_account_id?: string | null }[];
   templates: { id: string; title: string; tg_account_id?: string | null }[];
 }) {
   const [autoTags, setAutoTags] = useState<string[]>([]);
