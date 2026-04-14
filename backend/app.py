@@ -5583,6 +5583,69 @@ async def internal_sync_staff_role(
     return {"ok": True, "synced": True, "old_role": old_role, "new_role": req.new_role}
 
 
+class _ForceDisconnectRequest(PydanticBaseModel):
+    crm_account_id: str  # UUID of TgAccount row
+    reason: str | None = None
+
+
+@app.post("/api/internal/force-disconnect-account")
+async def internal_force_disconnect(
+    req: _ForceDisconnectRequest,
+    db: DB,
+    _: None = Depends(_verify_bot_secret),
+):
+    """Forcibly disconnect a TG account on behalf of PostForge.
+
+    Called by the PostForge worker when the monthly CRM charge fails
+    (insufficient balance). Mirrors the cleanup the owner would do via
+    DELETE /api/tg/disconnect/{account_id}, but driven from the billing
+    side without requiring a user session:
+
+    - Telethon client disconnected (removed from _clients map)
+    - TgAccount.is_active = False, disconnected_at = now
+    - StaffTgAccount links removed (so operators lose access)
+    - PostForge billing row flipped to is_active=false so we don't keep
+      trying to charge a frozen account
+
+    Idempotent — if the account is already inactive, this is a no-op.
+    """
+    from uuid import UUID as _UUID
+    try:
+        account_uuid = _UUID(req.crm_account_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid crm_account_id")
+
+    result = await db.execute(select(TgAccount).where(TgAccount.id == account_uuid))
+    account = result.scalar_one_or_none()
+    if not account:
+        return {"status": "not_found"}
+
+    if not account.is_active:
+        return {"status": "already_inactive"}
+
+    account.is_active = False
+    account.disconnected_at = datetime.utcnow()
+    await db.execute(sa_delete(StaffTgAccount).where(StaffTgAccount.tg_account_id == account_uuid))
+    await db.commit()
+
+    # Kill the Telethon session if it's still running in-process.
+    try:
+        from .telegram import disconnect_account
+        await disconnect_account(account_uuid)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"telethon disconnect failed (non-blocking): {e}")
+
+    # Mark PostForge billing row inactive too (same endpoint as the regular
+    # user-initiated disconnect flow).
+    try:
+        await _postforge_crm_billing_disconnect(str(account_uuid))
+    except Exception:
+        pass
+
+    return {"status": "disconnected", "reason": req.reason}
+
+
 # ============================================================
 # Health
 # ============================================================
