@@ -3935,7 +3935,13 @@ async def translate_text(req: TranslateRequest, user: CurrentUser):
         )
     _translate_limits[key].append(now)
 
+    # Graceful degradation: the unofficial Google Translate endpoint
+    # rate-limits / IP-blocks by region. When it fails we return the
+    # original text with a `failed: true` flag instead of 502, so the
+    # UI can show a subtle "перевод недоступен" badge without a red toast.
     import httpx
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -3964,11 +3970,15 @@ async def translate_text(req: TranslateRequest, user: CurrentUser):
                         translated = "".join(part[0] for part in data2[0] if part[0])
                         return {"translated": translated, "detected_lang": detected_lang}
                 return {"translated": translated, "detected_lang": detected_lang}
+            _log.warning(f"Translation upstream {resp.status_code}: {resp.text[:120]}")
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Translation failed: {e}")
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Translation failed")
-    raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Translation service unavailable")
+        _log.error(f"Translation upstream error: {e}")
+    return {
+        "translated": req.text,
+        "detected_lang": "unknown",
+        "failed": True,
+        "reason": "upstream_unavailable",
+    }
 
 
 # ============================================================
@@ -5649,6 +5659,159 @@ async def internal_force_disconnect(
         pass
 
     return {"status": "disconnected", "reason": req.reason}
+
+
+class _StatsQueryRequest(PydanticBaseModel):
+    pass
+
+
+@app.get("/api/internal/stats")
+async def internal_stats(
+    db: DB,
+    _: None = Depends(_verify_bot_secret),
+):
+    """Aggregate CRM-wide stats for the PostForge admin Статистика tab.
+
+    Authenticated with the shared POSTFORGE_BOT_SECRET (same as other
+    /api/internal/* endpoints). No per-org scoping — this is platform-
+    wide telemetry only. Returns zero-like values on empty tables.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    now = _dt.utcnow()
+    day_ago = now - _td(days=1)
+    week_ago = now - _td(days=7)
+    month_ago = now - _td(days=30)
+
+    # Accounts
+    accounts_total = (await db.execute(select(func.count(TgAccount.id)))).scalar() or 0
+    accounts_active = (await db.execute(
+        select(func.count(TgAccount.id)).where(TgAccount.is_active.is_(True))
+    )).scalar() or 0
+    accounts_inactive = accounts_total - accounts_active
+
+    # Contacts (= unique chats)
+    contacts_total = (await db.execute(select(func.count(Contact.id)))).scalar() or 0
+    contacts_approved = (await db.execute(
+        select(func.count(Contact.id)).where(Contact.status == "approved")
+    )).scalar() or 0
+    contacts_pending = (await db.execute(
+        select(func.count(Contact.id)).where(Contact.status == "pending")
+    )).scalar() or 0
+    contacts_archived = (await db.execute(
+        select(func.count(Contact.id)).where(Contact.is_archived.is_(True))
+    )).scalar() or 0
+
+    # Messages — windowed counts
+    msg_total = (await db.execute(select(func.count(Message.id)))).scalar() or 0
+    msg_day = (await db.execute(
+        select(func.count(Message.id)).where(Message.created_at >= day_ago)
+    )).scalar() or 0
+    msg_week = (await db.execute(
+        select(func.count(Message.id)).where(Message.created_at >= week_ago)
+    )).scalar() or 0
+    msg_month = (await db.execute(
+        select(func.count(Message.id)).where(Message.created_at >= month_ago)
+    )).scalar() or 0
+
+    # Direction split last 30d — shows inbound vs outbound ratio
+    dir_rows = await db.execute(
+        select(Message.direction, func.count(Message.id))
+        .where(Message.created_at >= month_ago)
+        .group_by(Message.direction)
+    )
+    by_direction_30d: dict[str, int] = {}
+    for d, c in dir_rows.all():
+        by_direction_30d[str(d)] = int(c or 0)
+
+    # Staff
+    staff_total = (await db.execute(select(func.count(Staff.id)))).scalar() or 0
+    staff_active = (await db.execute(
+        select(func.count(Staff.id)).where(Staff.is_active.is_(True))
+    )).scalar() or 0
+    staff_role_rows = await db.execute(
+        select(Staff.role, func.count(Staff.id))
+        .where(Staff.is_active.is_(True))
+        .group_by(Staff.role)
+    )
+    staff_by_role: dict[str, int] = {
+        str(role): int(c or 0) for role, c in staff_role_rows.all()
+    }
+
+    # Tags + templates
+    tags_total = (await db.execute(select(func.count(Tag.id)))).scalar() or 0
+    templates_total = (await db.execute(select(func.count(MessageTemplate.id)))).scalar() or 0
+
+    # Per-account activity — last 24h message counts top 20
+    per_acc_rows = await db.execute(
+        select(
+            TgAccount.id,
+            TgAccount.phone,
+            TgAccount.display_name,
+            TgAccount.is_active,
+            func.count(Message.id).label("msgs_24h"),
+        )
+        .outerjoin(Contact, Contact.tg_account_id == TgAccount.id)
+        .outerjoin(
+            Message,
+            (Message.contact_id == Contact.id) & (Message.created_at >= day_ago),
+        )
+        .group_by(TgAccount.id)
+        .order_by(func.count(Message.id).desc())
+        .limit(20)
+    )
+    per_account: list[dict] = []
+    for row in per_acc_rows.all():
+        per_account.append({
+            "id": str(row.id),
+            "phone": row.phone,
+            "display_name": row.display_name,
+            "is_active": bool(row.is_active),
+            "messages_24h": int(row.msgs_24h or 0),
+        })
+
+    # Broadcasts summary
+    try:
+        broadcasts_total = (await db.execute(select(func.count(Broadcast.id)))).scalar() or 0
+        broadcasts_30d = (await db.execute(
+            select(func.count(Broadcast.id)).where(Broadcast.created_at >= month_ago)
+        )).scalar() or 0
+    except Exception:
+        broadcasts_total = broadcasts_30d = 0
+
+    return {
+        "accounts": {
+            "total": int(accounts_total),
+            "active": int(accounts_active),
+            "inactive": int(accounts_inactive),
+        },
+        "contacts": {
+            "total": int(contacts_total),
+            "approved": int(contacts_approved),
+            "pending": int(contacts_pending),
+            "archived": int(contacts_archived),
+        },
+        "messages": {
+            "total": int(msg_total),
+            "last_24h": int(msg_day),
+            "last_7d": int(msg_week),
+            "last_30d": int(msg_month),
+            "per_day_avg_30d": round(int(msg_month) / 30, 1),
+            "by_direction_30d": by_direction_30d,
+        },
+        "staff": {
+            "total": int(staff_total),
+            "active": int(staff_active),
+            "by_role": staff_by_role,
+        },
+        "tags": {"total": int(tags_total)},
+        "templates": {"total": int(templates_total)},
+        "broadcasts": {
+            "total": int(broadcasts_total),
+            "last_30d": int(broadcasts_30d),
+        },
+        "per_account_24h": per_account,
+        "generated_at": now.isoformat(),
+    }
 
 
 # ============================================================
