@@ -27,8 +27,8 @@ engine = create_async_engine(
     # while awaiting an UPDATE that's blocked on a row-level lock (every
     # incoming TG message triggers UPDATE contacts SET last_message_*).
     # Pool exhaustion then blocked all HTTP requests (auth etc) → 500s.
-    pool_size=60,
-    max_overflow=60,
+    pool_size=30,
+    max_overflow=30,
     pool_recycle=1800,
     pool_pre_ping=True,
 )
