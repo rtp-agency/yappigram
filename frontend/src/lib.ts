@@ -109,8 +109,24 @@ export async function api(path: string, options: RequestInit = {}): Promise<any>
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "API Error");
+    const text = await res.text().catch(() => "");
+    let detail: unknown = "";
+    try {
+      const parsed = JSON.parse(text);
+      detail = parsed?.detail ?? parsed?.message ?? parsed?.error ?? "";
+    } catch {
+      // Non-JSON body (HTML error page from nginx/CF, plain text, etc).
+      detail = text.slice(0, 200);
+    }
+    if (Array.isArray(detail)) {
+      // FastAPI 422 validation errors come as a list of {loc, msg, type}.
+      detail = (detail as Array<{ msg?: string }>).map((d) => d?.msg || "").filter(Boolean).join("; ");
+    }
+    const shortDetail = typeof detail === "string" ? detail : JSON.stringify(detail);
+    const message = shortDetail || res.statusText || "API Error";
+    // Include HTTP status in the thrown message so the UI alert is actually
+    // debuggable ("403 — forbidden" vs. the old opaque "API Error").
+    throw new Error(`${res.status} — ${message}`);
   }
 
   if (res.status === 204) return null;
@@ -472,8 +488,20 @@ export interface Tag {
   tg_account_id: string | null;
 }
 
+// Cross-component refresh bus. Mutations here (create/update/delete of tags
+// and templates) dispatch a window-level CustomEvent so unrelated cards
+// elsewhere on the page (AutoSettingsCard, AdminSettingsSection, etc) can
+// refetch without us wiring prop drilling through every ancestor.
+function emitCrmChange(kind: "tags" | "templates") {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(`crm:${kind}-changed`));
+  }
+}
+
 export async function deleteTag(id: string) {
-  return api(`/api/tags/${id}`, { method: "DELETE" });
+  const r = await api(`/api/tags/${id}`, { method: "DELETE" });
+  emitCrmChange("tags");
+  return r;
 }
 
 export async function fetchTags(tgAccountId?: string): Promise<Tag[]> {
@@ -482,7 +510,9 @@ export async function fetchTags(tgAccountId?: string): Promise<Tag[]> {
 }
 
 export async function createTag(data: { name: string; color: string; tg_account_id?: string }): Promise<Tag> {
-  return api("/api/tags", { method: "POST", body: JSON.stringify(data) });
+  const r = await api("/api/tags", { method: "POST", body: JSON.stringify(data) });
+  emitCrmChange("tags");
+  return r;
 }
 
 export async function fetchContacts(status?: string, tgAccountId?: string, archived?: boolean, search?: string, limit?: number): Promise<Contact[]> {
@@ -584,15 +614,21 @@ export async function getTemplates(): Promise<Template[]> {
 }
 
 export async function createTemplate(data: { title: string; content: string; category?: string; shortcut?: string; tg_account_id?: string; blocks_json?: TemplateBlock[] }) {
-  return api("/api/templates", { method: "POST", body: JSON.stringify(data) });
+  const r = await api("/api/templates", { method: "POST", body: JSON.stringify(data) });
+  emitCrmChange("templates");
+  return r;
 }
 
 export async function updateTemplate(id: string, data: Partial<Template> & { blocks_json?: TemplateBlock[] }) {
-  return api(`/api/templates/${id}`, { method: "PATCH", body: JSON.stringify(data) });
+  const r = await api(`/api/templates/${id}`, { method: "PATCH", body: JSON.stringify(data) });
+  emitCrmChange("templates");
+  return r;
 }
 
 export async function deleteTemplate(id: string) {
-  return api(`/api/templates/${id}`, { method: "DELETE" });
+  const r = await api(`/api/templates/${id}`, { method: "DELETE" });
+  emitCrmChange("templates");
+  return r;
 }
 
 // ============================================================

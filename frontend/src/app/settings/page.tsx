@@ -1125,12 +1125,29 @@ function AdminSettingsSection() {
   const [tags, setTags] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
 
+  const refetchTags = () => api("/api/tags").then((r: any) => setTags(r || [])).catch(() => {});
+  const refetchTemplates = () => api("/api/templates").then((r: any) => setTemplates(r || [])).catch(() => {});
+
   useEffect(() => {
     fetchTgStatus().then((accs) => {
       setAccounts(accs.filter((a) => a.is_active !== false));
     }).catch(console.error);
-    api("/api/tags").then((r: any) => setTags(r || [])).catch(() => {});
-    api("/api/templates").then((r: any) => setTemplates(r || [])).catch(() => {});
+    refetchTags();
+    refetchTemplates();
+
+    // Sibling sections (TagsSection / TemplatesSection) fire these
+    // events after CUD. AutoSettingsCard reads `tags` / `templates`
+    // through us, so when either list changes we refetch and propagate
+    // fresh data down without a full page reload.
+    const onTags = () => refetchTags();
+    const onTpl = () => refetchTemplates();
+    window.addEventListener("crm:tags-changed", onTags);
+    window.addEventListener("crm:templates-changed", onTpl);
+    return () => {
+      window.removeEventListener("crm:tags-changed", onTags);
+      window.removeEventListener("crm:templates-changed", onTpl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fallback: if no accounts loaded from new endpoint, use old global setting

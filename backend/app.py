@@ -3294,11 +3294,16 @@ async def delete_tag(tag_id: UUID, user: ContentManager, db: DB):
     tag = result.scalar_one_or_none()
     if not tag:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
-    # Remove tag from all contacts in one SQL statement
+    # Remove tag from all contacts in one SQL statement.
+    # contacts.tags is VARCHAR[]; asyncpg infers the array literal as TEXT[]
+    # and PG has no VARCHAR[] @> TEXT[] operator, so we cast explicitly.
+    # Using `= ANY(tags)` instead of `@> ARRAY[...]` avoids the issue
+    # entirely (ANY() unwraps the array element per-row).
     tag_name = tag.name
     from sqlalchemy import text as _text
     await db.execute(_text(
-        "UPDATE contacts SET tags = array_remove(tags, :tag_name) WHERE tags @> ARRAY[:tag_name]"
+        "UPDATE contacts SET tags = array_remove(tags, CAST(:tag_name AS varchar)) "
+        "WHERE CAST(:tag_name AS varchar) = ANY(tags)"
     ), {"tag_name": tag_name})
     await db.delete(tag)
     await db.commit()
