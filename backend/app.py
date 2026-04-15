@@ -1232,7 +1232,15 @@ async def sso_auth(req: SsoAuthRequest, request: Request, db: DB):
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{settings.POSTFORGE_API_URL}/api/me",
-                headers={"Authorization": f"Bearer {req.postforge_token}"},
+                headers={
+                    "Authorization": f"Bearer {req.postforge_token}",
+                    # Tell PostForge this is a trusted service-to-service
+                    # call — it will validate the token + session liveness
+                    # but skip the per-request fingerprint/country check
+                    # (our origin IP/UA would otherwise fail the match and
+                    # revoke the user's session).
+                    "X-Service-Bot": settings.POSTFORGE_BOT_SECRET or "",
+                },
             )
         if resp.status_code != 200:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid PostForge token")
