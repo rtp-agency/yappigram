@@ -11,6 +11,31 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError
 import functools
 
 
+# ─── last_message_* debounce ─────────────────────────────────────────
+# Every incoming/outgoing TG message writes a new Message row AND updates
+# the denormalized preview on Contact (last_message_at/_content/_direction/
+# _is_read). During a burst (e.g. 50 messages in one chat within a second)
+# those contact updates all target the same row and serialize behind
+# row-level locks, burning one DB connection each until the pool is dry.
+#
+# Debounce: skip the Contact field update if the same contact had an
+# identical-direction update in the last 200ms. The Message row itself is
+# still persisted — only the denormalized preview is slightly stale. On a
+# direction flip (incoming→outgoing or vice-versa) we always update so the
+# UI's read/unread state doesn't lag.
+_LAST_MSG_DEBOUNCE: dict[UUID, tuple[float, str]] = {}
+_LAST_MSG_DEBOUNCE_WINDOW_S = 0.2
+
+
+def _should_skip_last_message_update(contact_id: UUID, direction: str) -> bool:
+    now = _time_module.monotonic()
+    prev = _LAST_MSG_DEBOUNCE.get(contact_id)
+    if prev and (now - prev[0]) < _LAST_MSG_DEBOUNCE_WINDOW_S and prev[1] == direction:
+        return True
+    _LAST_MSG_DEBOUNCE[contact_id] = (now, direction)
+    return False
+
+
 def _safe_handler(func):
     """Wrap Telethon event handler in try-except to prevent crashes."""
     @functools.wraps(func)
@@ -573,11 +598,12 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 grouped_id=getattr(msg_obj, "grouped_id", None),
             )
             db.add(msg)
-            contact.last_message_at = func.now()
-            _preview = sanitized_content or (f"[{media_type}]" if media_type else None)
-            contact.last_message_content = (_preview or "")[:200] or None
-            contact.last_message_direction = "outgoing"
-            contact.last_message_is_read = False
+            if not _should_skip_last_message_update(contact.id, "outgoing"):
+                contact.last_message_at = func.now()
+                _preview = sanitized_content or (f"[{media_type}]" if media_type else None)
+                contact.last_message_content = (_preview or "")[:200] or None
+                contact.last_message_direction = "outgoing"
+                contact.last_message_is_read = False
             await db.commit()
             await db.refresh(msg)
 
@@ -878,13 +904,16 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 grouped_id=getattr(msg_obj, "grouped_id", None),
             )
             db.add(msg)
-            contact.last_message_at = func.now()
             # Keep the denormalized preview fields in sync. /api/contacts
             # reads them directly — no subquery over messages on every call.
-            _preview = sanitized_content or (f"[{media_type}]" if media_type else None)
-            contact.last_message_content = (_preview or "")[:200] or None
-            contact.last_message_direction = "incoming"
-            contact.last_message_is_read = False
+            # Debounced: same-direction burst updates within 200ms skip the
+            # Contact row update to avoid pool exhaustion under TG floods.
+            if not _should_skip_last_message_update(contact.id, "incoming"):
+                contact.last_message_at = func.now()
+                _preview = sanitized_content or (f"[{media_type}]" if media_type else None)
+                contact.last_message_content = (_preview or "")[:200] or None
+                contact.last_message_direction = "incoming"
+                contact.last_message_is_read = False
             # Save before commit — attributes expire after commit
             contact_assigned_to = contact.assigned_to
             contact_tg_account_id = contact.tg_account_id

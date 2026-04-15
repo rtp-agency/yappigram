@@ -106,12 +106,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [isTg, setIsTg] = useState(false);
-  const [isEmbedded, setIsEmbedded] = useState(() => {
-    if (typeof window === "undefined") return false;
-    // Check sessionStorage first (persists across refreshes)
-    try { if (sessionStorage.getItem("crm_is_embedded") === "1") return true; } catch {}
-    return false;
-  });
+  const [isEmbedded, setIsEmbedded] = useState(false);
   const [isOrgTeam, setIsOrgTeam] = useState(false);
   const [isCrmAdmin, setIsCrmAdmin] = useState(false);
   const [dashLoading, setDashLoading] = useState(false);
@@ -119,14 +114,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // Init client-side state
   useEffect(() => {
-    // Detect iframe embedding
+    // Detect iframe embedding.
+    //
+    // Only rely on reliable signals: actual iframe nesting
+    // (window.self !== window.top) and an explicit ?embedded=1 query
+    // param. The previous referrer-based heuristic caused a sticky
+    // false positive: one click from metra-ai.org landed the user on
+    // crm.metra-ai.org directly, referrer-detection flipped "embedded"
+    // to true, cached it in sessionStorage — and the mobile bottom
+    // nav then stayed hidden forever on subsequent reloads.
     let embedded = false;
     try { embedded = window.self !== window.top; } catch { embedded = true; }
-    if (!embedded) { try { embedded = window.parent !== window; } catch { embedded = true; } }
-    if (!embedded) { try { embedded = new URLSearchParams(window.location.search).get("embedded") === "1"; } catch {} }
-    if (!embedded) { try { embedded = sessionStorage.getItem("crm_is_embedded") === "1"; } catch {} }
-    if (!embedded) { try { embedded = document.referrer.includes("metra-ai.org") && !document.referrer.includes("crm.metra-ai.org"); } catch {} }
-    if (embedded) { try { sessionStorage.setItem("crm_is_embedded", "1"); } catch {} }
+    if (!embedded) {
+      try { embedded = new URLSearchParams(window.location.search).get("embedded") === "1"; } catch {}
+    }
+    // Clear any legacy stuck sessionStorage flag so reopened tabs
+    // redetect cleanly.
+    try { sessionStorage.removeItem("crm_is_embedded"); } catch {}
     setIsEmbedded(embedded);
     // Restore cached org team status
     try {
