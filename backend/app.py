@@ -5753,6 +5753,85 @@ class _StatsQueryRequest(PydanticBaseModel):
     pass
 
 
+@app.get("/api/internal/user-crm-info/{pf_user_id}")
+async def internal_user_crm_info(
+    pf_user_id: str,
+    db: DB,
+    _: None = Depends(_verify_bot_secret),
+):
+    """Return CRM info for a PostForge user — their staff role and the
+    TG accounts they can see. Used by the PostForge support panel to show
+    support staff what CRM access each user has.
+
+    Scoping rules:
+    - super_admin / admin → sees ALL TG accounts in their org
+    - operator → only accounts explicitly assigned via staff_tg_accounts
+    """
+    # Find ACTIVE staff rows for this pf user (may have multiple org contexts)
+    staff_result = await db.execute(
+        select(Staff).where(
+            Staff.postforge_user_id == pf_user_id,
+            Staff.is_active.is_(True),
+        )
+    )
+    staff_rows = list(staff_result.scalars().all())
+    if not staff_rows:
+        from fastapi import HTTPException as _HTTPE
+        raise _HTTPE(status_code=404, detail="No active CRM staff for this user")
+
+    # For each staff row (one per org context), collect accessible accounts
+    profiles = []
+    for s in staff_rows:
+        org_id = s.postforge_org_id or "unknown"
+        if s.role in ("super_admin", "admin"):
+            # All org accounts
+            acct_result = await db.execute(
+                select(TgAccount)
+                .where(TgAccount.org_id == org_id)
+                .order_by(TgAccount.connected_at.desc())
+            )
+            accounts = list(acct_result.scalars().all())
+            access_type = "all_org_accounts"
+        else:
+            # Operator — only assigned accounts
+            assigned_subq = (
+                select(StaffTgAccount.tg_account_id)
+                .where(StaffTgAccount.staff_id == s.id)
+                .subquery()
+            )
+            acct_result = await db.execute(
+                select(TgAccount)
+                .where(TgAccount.id.in_(select(assigned_subq)))
+                .order_by(TgAccount.connected_at.desc())
+            )
+            accounts = list(acct_result.scalars().all())
+            access_type = "assigned_only"
+
+        tg_accounts = [{
+            "id": str(a.id),
+            "phone": a.phone,
+            "display_name": a.display_name,
+            "is_active": bool(a.is_active),
+            "connected_at": a.connected_at.isoformat() if a.connected_at else None,
+        } for a in accounts]
+
+        profiles.append({
+            "staff_id": str(s.id),
+            "org_id": org_id,
+            "role": s.role,
+            "is_crm_admin": bool(s.is_crm_admin),
+            "signature_mode": s.signature_mode,
+            "access_type": access_type,
+            "tg_accounts": tg_accounts,
+            "tg_accounts_count": len(tg_accounts),
+        })
+
+    return {
+        "postforge_user_id": pf_user_id,
+        "profiles": profiles,
+    }
+
+
 @app.get("/api/internal/stats")
 async def internal_stats(
     db: DB,
