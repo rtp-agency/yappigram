@@ -258,6 +258,73 @@ async def _postforge_crm_billing_disconnect(crm_account_id: str) -> None:
         pass
 
 
+async def _postforge_funnel_stage_update(
+    campaign_id: str, telegram_user_id: int, stage: str
+) -> None:
+    """Push a funnel-stage change to PostForge after operator tags a Contact.
+
+    Best-effort, fire-and-forget. Any failure (network, 4xx, 5xx) is logged
+    and swallowed so that yappigram's PATCH /api/contacts/{id} never fails
+    because PostForge is unreachable. The tag still saves locally in CRM.
+    """
+    if not settings.POSTFORGE_API_URL or not settings.POSTFORGE_BOT_SECRET:
+        return
+    import httpx
+    # Use the internal/service-bot endpoint, not the user-facing one — the
+    # internal variant accepts `Authorization: Bot <BACKEND_BOT_SECRET>` and
+    # skips the JWT/permission machinery that the UI version requires.
+    url = (
+        f"{settings.POSTFORGE_API_URL.rstrip('/')}"
+        f"/api/internal/traffic/campaigns/{campaign_id}/subscribers/{telegram_user_id}/funnel-stage"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                url,
+                json={"stage": stage},
+                headers={"Authorization": f"Bot {settings.POSTFORGE_BOT_SECRET}"},
+            )
+        if resp.status_code >= 400:
+            print(
+                f"[POSTFORGE] funnel-stage push non-200: status={resp.status_code} "
+                f"campaign={campaign_id} tg_user={telegram_user_id} stage={stage} "
+                f"body={resp.text[:300]}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[POSTFORGE] funnel-stage pushed: campaign={campaign_id} "
+                f"tg_user={telegram_user_id} stage={stage}",
+                flush=True,
+            )
+    except Exception as e:
+        print(
+            f"[POSTFORGE] funnel-stage push failed: {e} "
+            f"campaign={campaign_id} tg_user={telegram_user_id} stage={stage}",
+            flush=True,
+        )
+
+
+# Parse the tag→stage mapping once at import time. If the env var is malformed,
+# we log and fall back to an empty dict (webhook becomes a no-op rather than
+# crashing the whole module).
+def _load_tag_to_stage_map() -> dict[str, str]:
+    import json as _json
+    raw = settings.POSTFORGE_TAG_TO_FUNNEL_STAGE or "{}"
+    try:
+        parsed = _json.loads(raw)
+        if not isinstance(parsed, dict):
+            print(f"[POSTFORGE] POSTFORGE_TAG_TO_FUNNEL_STAGE is not an object: {raw!r}", flush=True)
+            return {}
+        return {str(k): str(v) for k, v in parsed.items()}
+    except Exception as e:
+        print(f"[POSTFORGE] failed to parse POSTFORGE_TAG_TO_FUNNEL_STAGE ({e!r}): {raw!r}", flush=True)
+        return {}
+
+
+_TAG_TO_STAGE: dict[str, str] = _load_tag_to_stage_map()
+
+
 async def _postforge_crm_billing_accounts(user) -> list:
     """Get billing info for all user's CRM accounts from PostForge."""
     if not settings.POSTFORGE_API_URL or not settings.POSTFORGE_BOT_SECRET:
@@ -769,6 +836,13 @@ async def on_startup():
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_muted BOOLEAN NOT NULL DEFAULT false;
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS crm_muted BOOLEAN NOT NULL DEFAULT false;
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_thumb TEXT;
+                -- PostForge integration: link contact to the campaign that brought
+                -- this user (set on /api/internal/postforge-contact-upsert). When
+                -- operator tags the contact, we use this to know which PostForge
+                -- BotSubscriber row to update funnel_stage on.
+                ALTER TABLE contacts ADD COLUMN IF NOT EXISTS postforge_campaign_id UUID;
+                CREATE INDEX IF NOT EXISTS ix_contacts_postforge_campaign
+                    ON contacts (postforge_campaign_id) WHERE postforge_campaign_id IS NOT NULL;
                 -- Denormalized last-message preview. Replaces the expensive
                 -- subquery that /api/contacts ran on every call.
                 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_message_content VARCHAR(200);
@@ -1788,6 +1862,10 @@ async def get_contact(contact_id: UUID, user: CurrentUser, db: DB):
 async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser, db: DB):
     contact = await _get_contact_with_access(contact_id, user, db)
 
+    # Snapshot old tags BEFORE assignment so we can detect newly-added tags
+    # for the PostForge funnel webhook below.
+    old_tags = set(contact.tags or [])
+
     if req.alias is not None:
         contact.alias = req.alias
     if req.tags is not None:
@@ -1801,6 +1879,40 @@ async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser
 
     await db.commit()
     await db.refresh(contact)
+
+    # PostForge funnel webhook: if the operator added a tag that maps to a
+    # PostForge funnel stage (e.g. "qualified", "купил") AND this contact is
+    # linked to a PostForge campaign — push the stage update so the pixel
+    # learns about QualifiedLead / Application / Purchase events.
+    #
+    # Best-effort: any failure is logged inside the helper and doesn't
+    # affect this PATCH response. Skip silently if Contact has no
+    # postforge_campaign_id (legacy contacts created before integration).
+    if (
+        req.tags is not None
+        and contact.postforge_campaign_id
+        and contact.real_tg_id
+        and _TAG_TO_STAGE
+    ):
+        new_tags = set(req.tags or [])
+        added = new_tags - old_tags
+        # Pick the FIRST mapped tag from the diff (deterministic order via
+        # original list iteration). If multiple stage-mapping tags were
+        # added in one PATCH, only the first one fires — that's enough.
+        stage_to_push: str | None = None
+        for tag in (req.tags or []):
+            if tag in added and tag in _TAG_TO_STAGE:
+                stage_to_push = _TAG_TO_STAGE[tag]
+                break
+        if stage_to_push:
+            import asyncio as _asyncio
+            _asyncio.create_task(
+                _postforge_funnel_stage_update(
+                    campaign_id=str(contact.postforge_campaign_id),
+                    telegram_user_id=int(contact.real_tg_id),
+                    stage=stage_to_push,
+                )
+            )
 
     # Apply show_real_names / group title resolution ONLY if alias wasn't explicitly changed
     if req.alias is None:
@@ -5747,6 +5859,120 @@ async def internal_force_disconnect(
         pass
 
     return {"status": "disconnected", "reason": req.reason}
+
+
+class _PostForgeContactUpsertRequest(PydanticBaseModel):
+    """Body for /api/internal/postforge-contact-upsert.
+
+    Sent by PostForge worker when a user does /start in a campaign bot, so
+    that an operator immediately sees the new lead in CRM without waiting
+    for the user to write first.
+    """
+    telegram_user_id: int
+    campaign_id: str  # PostForge AdCampaign.id (UUID as str)
+    postforge_user_id: str  # owner of the campaign — used to find Staff/org
+    postforge_org_id: str | None = None  # explicit org if PostForge has one
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+
+
+@app.post("/api/internal/postforge-contact-upsert")
+async def internal_postforge_contact_upsert(
+    req: _PostForgeContactUpsertRequest,
+    db: DB,
+    _: None = Depends(_verify_bot_secret),
+):
+    """Auto-create or auto-link a Contact when PostForge sees a /start.
+
+    Lookup chain:
+      1. If postforge_org_id provided → find Staff with both pf_user_id+org_id
+         and pull TgAccount(s) in that org via org_id
+      2. Otherwise → first ACTIVE staff for postforge_user_id, then their
+         postforge_org_id, then first active TgAccount with that org_id
+      3. If no Staff or no TgAccount → return 404. PostForge logs warning,
+         /start flow continues unaffected.
+
+    UPSERT key: (tg_account_id, real_tg_id). If contact exists — set
+    postforge_campaign_id (don't overwrite other fields). If not — create
+    a minimal contact row.
+    """
+    from .telegram import generate_alias as _gen_alias
+    from uuid import UUID as _UUID
+
+    try:
+        campaign_uuid = _UUID(req.campaign_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid campaign_id")
+
+    # 1. Find Staff
+    staff_query = select(Staff).where(
+        Staff.postforge_user_id == req.postforge_user_id,
+        Staff.is_active.is_(True),
+    )
+    if req.postforge_org_id:
+        staff_query = staff_query.where(Staff.postforge_org_id == req.postforge_org_id)
+    staff_query = staff_query.limit(1)
+    staff = (await db.execute(staff_query)).scalar_one_or_none()
+    if not staff:
+        return {"status": "skipped", "reason": "no active staff for postforge_user_id"}
+
+    org_id = staff.postforge_org_id
+    if not org_id:
+        return {"status": "skipped", "reason": "staff has no postforge_org_id"}
+
+    # 2. Find first active TgAccount in this org
+    tg_account = (await db.execute(
+        select(TgAccount)
+        .where(TgAccount.org_id == org_id, TgAccount.is_active.is_(True))
+        .limit(1)
+    )).scalar_one_or_none()
+    if not tg_account:
+        return {"status": "skipped", "reason": "no active TgAccount in org"}
+
+    # 3. UPSERT Contact by (tg_account_id, real_tg_id)
+    existing = (await db.execute(
+        select(Contact).where(
+            Contact.tg_account_id == tg_account.id,
+            Contact.real_tg_id == req.telegram_user_id,
+        ).limit(1)
+    )).scalar_one_or_none()
+
+    if existing:
+        # Just link to the campaign. Don't overwrite name/alias/tags etc.
+        if existing.postforge_campaign_id != campaign_uuid:
+            existing.postforge_campaign_id = campaign_uuid
+            await db.commit()
+            await db.refresh(existing)
+        return {"status": "linked", "contact_id": str(existing.id), "created": False}
+
+    # Build minimal new Contact. Encrypt the real name/username so we don't
+    # break the encryption invariant the rest of the codebase relies on.
+    real_name = " ".join(
+        p for p in (req.first_name, req.last_name) if p
+    ).strip() or (req.username or "")
+    seq = (await db.execute(select(func.count(Contact.id)))).scalar() + 1
+    alias = _gen_alias(real_name, seq)
+
+    new_contact = Contact(
+        tg_account_id=tg_account.id,
+        real_tg_id=req.telegram_user_id,
+        real_name_encrypted=encrypt(real_name) if real_name else None,
+        real_username_encrypted=encrypt(req.username) if req.username else None,
+        chat_type="private",
+        alias=alias,
+        status="approved",
+        postforge_campaign_id=campaign_uuid,
+    )
+    db.add(new_contact)
+    await db.commit()
+    await db.refresh(new_contact)
+    print(
+        f"[INTERNAL] postforge-contact-upsert created Contact id={new_contact.id} "
+        f"alias={alias} tg_user={req.telegram_user_id} campaign={req.campaign_id}",
+        flush=True,
+    )
+    return {"status": "created", "contact_id": str(new_contact.id), "created": True}
 
 
 class _StatsQueryRequest(PydanticBaseModel):

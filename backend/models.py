@@ -129,6 +129,12 @@ class Contact(Base):
     tags = Column(ARRAY(String), default=lambda: [])
     notes = Column(Text)
     is_archived = Column(Boolean, default=False)
+
+    # PostForge integration: campaign this lead came from (set when PostForge
+    # auto-creates the contact via /api/internal/postforge-contact-upsert on
+    # user's /start c_{slug}). Used by the tag-change webhook to know which
+    # PostForge BotSubscriber to update funnel_stage on.
+    postforge_campaign_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     # Pin status synced FROM Telegram. Represents Telegram's native pin state,
     # not the CRM's manual PinnedChat table (which is per-staff). Refreshed on
     # every _do_sync_dialogs run.

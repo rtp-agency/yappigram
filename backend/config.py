@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     POSTFORGE_BOT_TOKEN: str = ""  # PostForge bot token (for Mini App initData validation)
     POSTFORGE_BOT_SECRET: str = ""  # Shared secret for calling PostForge internal APIs (Bot {secret} header)
 
+    # Маппинг операторских тегов на стадии воронки PostForge.
+    # Когда оператор тегает Contact — мы лукапим `tag → stage` в этом словаре
+    # и шлём webhook в PostForge только если стадия найдена. Если тега нет в
+    # маппинге — webhook не идёт (тег — это произвольная строка, не каждая
+    # из них означает прогресс воронки). Парсится JSON один раз при старте.
+    POSTFORGE_TAG_TO_FUNNEL_STAGE: str = (
+        '{"qualified":"qualified","engaged":"engaged",'
+        '"купил":"application","заявка":"application",'
+        '"оплатил":"application","purchased":"application"}'
+    )
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
