@@ -1373,6 +1373,44 @@ async def set_chat_mute(account_id: UUID, tg_id: int, muted: bool) -> None:
         ))
 
 
+async def set_chat_pin(account_id: UUID, tg_id: int, pinned: bool) -> None:
+    """Toggle Telegram's native dialog pin for a chat via Telethon.
+
+    Previously CRM pin state was CRM-only (`PinnedChat` table), which meant
+    a chat already pinned in the native Telegram client could not be
+    unpinned from CRM — the unpin button showed an alert telling the user
+    to do it in Telegram itself. Now CRM drives the real TG pin so both
+    sides stay in sync.
+
+    Uses ToggleDialogPinRequest. TG imposes a hard cap (by default 5
+    pinned chats in the main list; Premium users get 10). Exceeding the
+    cap raises PinnedDialogsTooMuchError which we surface to the caller.
+    """
+    from telethon.tl.functions.messages import ToggleDialogPinRequest
+    from telethon.tl.types import InputDialogPeer
+
+    client = _clients.get(account_id)
+    if not client:
+        client = await _try_reconnect(account_id)
+    if not client:
+        raise ValueError("Telegram-аккаунт не подключён. Проверьте подключение в настройках.")
+
+    peer = await client.get_input_entity(tg_id)
+    try:
+        await client(ToggleDialogPinRequest(
+            peer=InputDialogPeer(peer=peer),
+            pinned=pinned,
+        ))
+    except FloodWaitError as e:
+        wait = min(e.seconds, 60)
+        print(f"[FLOOD] set_chat_pin rate limited, waiting {wait}s", flush=True)
+        await asyncio.sleep(wait)
+        await client(ToggleDialogPinRequest(
+            peer=InputDialogPeer(peer=peer),
+            pinned=pinned,
+        ))
+
+
 async def send_message(
     account_id: UUID,
     tg_id: int,

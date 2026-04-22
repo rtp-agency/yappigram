@@ -1747,23 +1747,42 @@ function ChatsContent() {
 
   const togglePin = async (contactId: string) => {
     const contact = contacts.find((c) => c.id === contactId);
-    // If the chat is pinned natively in Telegram, the pin state is owned by
-    // Telegram — CRM can't unpin it. Surface this to the user instead of
-    // silently toggling a separate CRM pin (which would leave the icon stuck
-    // "filled" and the unpin button non-functional).
-    if (contact?.is_pinned && !pinned.has(contactId)) {
-      alert("Этот чат закреплён в Telegram. Открепите его в приложении Telegram.");
-      return;
+    if (!contact) return;
+    // CRM drives the real Telegram pin now — a chat pinned in either TG or
+    // CRM maps to the SAME action here. "Currently pinned" = either
+    // contact.is_pinned (mirrored from TG via sync) OR our local pinned set
+    // (CRM-only fallback, kept for now so the legacy per-staff ordering UI
+    // keeps working).
+    const currentlyPinned = !!contact.is_pinned || pinned.has(contactId);
+    const nextPinned = !currentlyPinned;
+
+    // Optimistic: flip both layers.
+    setContacts((prev) => prev.map((c) => c.id === contactId ? { ...c, is_pinned: nextPinned } : c));
+    setPinned((prev) => {
+      const next = new Set(prev);
+      nextPinned ? next.add(contactId) : next.delete(contactId);
+      return next;
+    });
+    if (selected?.id === contactId) {
+      setSelected((s) => s ? { ...s, is_pinned: nextPinned } : s);
     }
-    const isPinned = pinned.has(contactId);
+
     try {
-      await api(`/api/pinned/${contactId}`, { method: isPinned ? "DELETE" : "POST" });
+      await api(`/api/pinned/${contactId}`, { method: nextPinned ? "POST" : "DELETE" });
+    } catch (e: any) {
+      // Revert on failure — backend returns 502 "Telegram отклонил ..."
+      // when the pin cap (5 non-Premium, 10 Premium) is exceeded.
+      setContacts((prev) => prev.map((c) => c.id === contactId ? { ...c, is_pinned: currentlyPinned } : c));
       setPinned((prev) => {
         const next = new Set(prev);
-        isPinned ? next.delete(contactId) : next.add(contactId);
+        currentlyPinned ? next.add(contactId) : next.delete(contactId);
         return next;
       });
-    } catch (e: any) { console.error(e); }
+      if (selected?.id === contactId) {
+        setSelected((s) => s ? { ...s, is_pinned: currentlyPinned } : s);
+      }
+      alert(e?.message || "Не удалось изменить закрепление в Telegram");
+    }
   };
 
   const toggleMute = async (contactId: string) => {

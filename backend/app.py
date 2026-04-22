@@ -2025,47 +2025,71 @@ async def get_pinned(user: Annotated[Staff, Depends(get_current_user)], db: DB):
     return [str(row[0]) for row in result.all()]
 
 
-@app.post("/api/pinned/{contact_id}", status_code=204)
-async def pin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
+async def _set_contact_pin(contact_id: UUID, user: Staff, db, pinned: bool) -> None:
+    """Shared body for pin/unpin. Pushes the real Telegram pin state via
+    Telethon, mirrors it to Contact.is_pinned, and keeps the legacy
+    PinnedChat table in sync so the existing UI (pinned Set) continues to
+    work. When TG push fails (account disconnected, pin cap exceeded),
+    raises HTTP 400/502 — the frontend can then surface the actual reason.
+    """
+    from telegram import set_chat_pin
+    from sqlalchemy import delete as sa_delete
+
     org = _org_id(user)
-    # Verify the contact belongs to user's org before pinning.
-    # Without this, any user could pin contacts from other orgs by guessing UUIDs.
-    contact_check = await db.execute(
-        select(Contact.id).where(
-            Contact.id == contact_id,
-            Contact.tg_account_id.in_(_org_accounts_subq(user)),
-        )
-    )
-    if not contact_check.scalar_one_or_none():
+    result = await db.execute(select(Contact).where(
+        Contact.id == contact_id,
+        Contact.tg_account_id.in_(_org_accounts_subq(user)),
+    ))
+    contact = result.scalar_one_or_none()
+    if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
-    existing = await db.execute(
-        select(PinnedChat).where(PinnedChat.org_id == org, PinnedChat.contact_id == contact_id)
-    )
-    if existing.scalar_one_or_none():
-        return
-    db.add(PinnedChat(staff_id=user.id, contact_id=contact_id, org_id=org))
+    try:
+        await set_chat_pin(contact.tg_account_id, contact.real_tg_id, pinned)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except Exception as e:
+        # Most common failure: PinnedDialogsTooMuchError when user already
+        # has 5 pinned chats (TG hard cap for non-Premium). Surface the
+        # verbatim Telegram message so the UI can show it.
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Telegram отклонил изменение пина: {e}")
+
+    contact.is_pinned = pinned
+
+    # Keep legacy per-org PinnedChat in sync so existing list-sort / UI bits
+    # still work without a second round-trip. Idempotent: double-pin or
+    # double-unpin is a no-op.
+    if pinned:
+        existing = await db.execute(
+            select(PinnedChat).where(PinnedChat.org_id == org, PinnedChat.contact_id == contact_id)
+        )
+        if not existing.scalar_one_or_none():
+            db.add(PinnedChat(staff_id=user.id, contact_id=contact_id, org_id=org))
+    else:
+        await db.execute(
+            sa_delete(PinnedChat).where(PinnedChat.org_id == org, PinnedChat.contact_id == contact_id)
+        )
+
     await db.commit()
+    await cache_invalidate(f"contacts:{org}:*")
+
+
+@app.post("/api/pinned/{contact_id}", status_code=204)
+async def pin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
+    """Pin chat both in Telegram (real pin) and in CRM.
+
+    Previously CRM was a separate pin layer — users could not unpin chats
+    that were pinned natively in Telegram because CRM only removed its own
+    PinnedChat row. Now pin/unpin drive the real Telegram state via
+    Telethon's ToggleDialogPinRequest.
+    """
+    await _set_contact_pin(contact_id, user, db, pinned=True)
 
 
 @app.delete("/api/pinned/{contact_id}", status_code=204)
 async def unpin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
-    from sqlalchemy import delete as sa_delete
-    org = _org_id(user)
-    # Only delete if the contact belongs to user's org (defense in depth).
-    contact_check = await db.execute(
-        select(Contact.id).where(
-            Contact.id == contact_id,
-            Contact.tg_account_id.in_(_org_accounts_subq(user)),
-        )
-    )
-    if not contact_check.scalar_one_or_none():
-        raise HTTPException(status.HTTP_404_NOT_FOUND)
-
-    await db.execute(
-        sa_delete(PinnedChat).where(PinnedChat.org_id == org, PinnedChat.contact_id == contact_id)
-    )
-    await db.commit()
+    """Unpin chat in Telegram + remove the CRM pin row."""
+    await _set_contact_pin(contact_id, user, db, pinned=False)
 
 
 @app.get("/api/contacts/{contact_id}/reveal", response_model=ContactReveal)
