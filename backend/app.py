@@ -309,6 +309,13 @@ async def _postforge_funnel_stage_update(
 # we log and fall back to an empty dict (webhook becomes a no-op rather than
 # crashing the whole module).
 def _load_tag_to_stage_map() -> dict[str, str]:
+    """Returns a dict whose KEYS are normalized to lowercase + stripped.
+
+    Operators in CRM write tags as free-form strings — `qualified`,
+    `Qualified`, `QUALIFIED`, ` qualified ` are all the same intent. We
+    lowercase both the map keys here and the tag at lookup time so the
+    webhook fires regardless of how the operator capitalised the tag.
+    """
     import json as _json
     raw = settings.POSTFORGE_TAG_TO_FUNNEL_STAGE or "{}"
     try:
@@ -316,7 +323,7 @@ def _load_tag_to_stage_map() -> dict[str, str]:
         if not isinstance(parsed, dict):
             print(f"[POSTFORGE] POSTFORGE_TAG_TO_FUNNEL_STAGE is not an object: {raw!r}", flush=True)
             return {}
-        return {str(k): str(v) for k, v in parsed.items()}
+        return {str(k).strip().lower(): str(v) for k, v in parsed.items()}
     except Exception as e:
         print(f"[POSTFORGE] failed to parse POSTFORGE_TAG_TO_FUNNEL_STAGE ({e!r}): {raw!r}", flush=True)
         return {}
@@ -1899,6 +1906,8 @@ async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser
         and contact.real_tg_id
         and _TAG_TO_STAGE
     ):
+        # Diff against the OLD tags case-sensitively (preserves operator's
+        # capitalization in DB), but lookup in TAG_TO_STAGE case-INsensitively.
         new_tags = set(req.tags or [])
         added = new_tags - old_tags
         # Pick the FIRST mapped tag from the diff (deterministic order via
@@ -1906,9 +1915,13 @@ async def update_contact(contact_id: UUID, req: ContactUpdate, user: CurrentUser
         # added in one PATCH, only the first one fires — that's enough.
         stage_to_push: str | None = None
         for tag in (req.tags or []):
-            if tag in added and tag in _TAG_TO_STAGE:
-                stage_to_push = _TAG_TO_STAGE[tag]
-                break
+            if tag in added:
+                # Normalize for lookup so "Qualified" / "QUALIFIED" /
+                # " qualified " all match the "qualified" map key.
+                stage = _TAG_TO_STAGE.get(str(tag).strip().lower())
+                if stage:
+                    stage_to_push = stage
+                    break
         if stage_to_push:
             import asyncio as _asyncio
             _asyncio.create_task(
