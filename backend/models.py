@@ -341,6 +341,12 @@ class Broadcast(Base):
     # even if the user hand-picked someone in a manual selection, if that
     # contact carries a banned tag they still get dropped at send time.
     tag_exclude = Column(ARRAY(String), default=lambda: [])
+    # Off by default: archived contacts are excluded from the recipient
+    # set unless the user explicitly opts in via the broadcast modal.
+    # Tags exist on contacts regardless of archive state, so picking a
+    # tag whose holders all sit in archive used to surface "0 подходит"
+    # with no obvious recourse — flipping this on lifts the archive cut.
+    include_archived = Column(Boolean, default=False, nullable=False, server_default="false")
     max_recipients = Column(Integer, nullable=True)  # Random N from filtered set
     contact_ids = Column(ARRAY(UUID(as_uuid=True)), default=lambda: [])  # Manual selection
 

@@ -278,6 +278,9 @@ class BroadcastCreate(BaseModel):
     tg_account_id: UUID
     tag_filter: list[str] = []
     tag_exclude: list[str] = []  # Contacts with ANY of these tags are dropped
+    # Off by default — keeps existing broadcasts archived-blind, matches
+    # the previous behavior. Frontend exposes a checkbox to flip this on.
+    include_archived: bool = False
     # No pydantic ge=5 floor — we want old clients sending delay=1..4 to
     # still save a draft (it gets clamped to 5 at the handler, see
     # create/update_broadcast). A hard 422 here would break any cached
@@ -295,6 +298,7 @@ class BroadcastOut(BaseModel):
     tg_account_id: UUID
     tag_filter: list[str] = []
     tag_exclude: list[str] = []
+    include_archived: bool = False
     max_recipients: int | None = None
     delay_seconds: int
     status: str

@@ -67,15 +67,25 @@ _clients: dict[UUID, TelegramClient] = {}
 # also capped throughput at ~0.67 outgoing events/sec. Now the CRM path
 # marks the tg_msg_id here and the listener skips it immediately.
 #
-# Key: (account_id, tg_message_id). Value: expiry unix ts. Bounded size;
-# stale entries are evicted opportunistically on insert.
+# Key: (account_id, peer_tg_id, tg_message_id). Telegram message IDs are
+# per-chat (regular DMs) or per-channel (channels), NOT per-account, so
+# two chats on the same account can both hit msg_id=42. Including the
+# peer makes the key globally unique across the account — without it,
+# native-TG outgoing messages occasionally got skipped because the CRM
+# had recently sent a same-numbered message to a different peer.
+# Value: expiry unix ts. Bounded size; stale entries evicted on insert.
 _crm_sent_tracker: dict[tuple, float] = {}
 _CRM_SENT_TTL = 30.0
 
+# Env-gated diagnostic logging for the outgoing handler. Off by default
+# so steady-state log volume doesn't balloon — flip on briefly when
+# investigating "native TG outgoing not appearing in CRM" reports.
+_DEBUG_OUTGOING = os.getenv("CRM_DEBUG_OUTGOING_LISTENER", "").lower() in ("1", "true", "yes")
 
-def _mark_crm_sent(account_id: UUID, tg_msg_id: int) -> None:
+
+def _mark_crm_sent(account_id: UUID, peer_tg_id: int, tg_msg_id: int) -> None:
     now = _time_module.time()
-    _crm_sent_tracker[(account_id, tg_msg_id)] = now + _CRM_SENT_TTL
+    _crm_sent_tracker[(account_id, peer_tg_id, tg_msg_id)] = now + _CRM_SENT_TTL
     # Opportunistic GC: when the dict gets "big", drop expired entries.
     if len(_crm_sent_tracker) > 1000:
         expired = [k for k, exp in _crm_sent_tracker.items() if exp < now]
@@ -83,12 +93,13 @@ def _mark_crm_sent(account_id: UUID, tg_msg_id: int) -> None:
             _crm_sent_tracker.pop(k, None)
 
 
-def _is_crm_sent(account_id: UUID, tg_msg_id: int) -> bool:
-    exp = _crm_sent_tracker.get((account_id, tg_msg_id))
+def _is_crm_sent(account_id: UUID, peer_tg_id: int, tg_msg_id: int) -> bool:
+    key = (account_id, peer_tg_id, tg_msg_id)
+    exp = _crm_sent_tracker.get(key)
     if exp is None:
         return False
     if exp < _time_module.time():
-        _crm_sent_tracker.pop((account_id, tg_msg_id), None)
+        _crm_sent_tracker.pop(key, None)
         return False
     return True
 
@@ -468,22 +479,35 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
     @client.on(events.NewMessage(outgoing=True))
     @_safe_handler
     async def on_outgoing_message(event):
-        """Capture messages sent directly from Telegram (not through CRM)."""
+        """Capture messages sent directly from Telegram (not through CRM).
+
+        Fires for both same-client outgoing (CRM-driven sends, dedup'd via
+        the _crm_sent_tracker) and cross-client outgoing (the user typed
+        the message in the native Telegram app while logged into the same
+        account — Telegram delivers updateNewMessage with .out=True to
+        every other session of the account).
+        """
         msg_obj = event.message
         chat = await event.get_chat()
         if not chat:
+            if _DEBUG_OUTGOING:
+                print(f"[OUTGOING] {account.phone}: skip — chat unavailable for msg {msg_obj.id}", flush=True)
             return
+
+        is_group = event.is_group or event.is_channel
+        peer_tg_id = event.chat_id
 
         # Skip messages sent through the CRM API — they're already being
         # saved by the API handler. The previous 1.5s sleep here was a
         # race-condition workaround that capped outgoing throughput at
         # ~0.67 events/sec; the in-memory tracker is O(1) and avoids the
         # sleep entirely. DB dedup check below is kept as a safety net.
-        if _is_crm_sent(account.id, msg_obj.id):
+        # Tracker key now includes peer_tg_id (Telegram msg IDs are per-
+        # chat, not per-account, so two chats can collide on msg_id=42).
+        if _is_crm_sent(account.id, peer_tg_id, msg_obj.id):
+            if _DEBUG_OUTGOING:
+                print(f"[OUTGOING] {account.phone}: skip — CRM-originated peer={peer_tg_id} msg={msg_obj.id}", flush=True)
             return
-
-        is_group = event.is_group or event.is_channel
-        peer_tg_id = event.chat_id
 
         async with async_session() as db:
             # Only save if contact exists and is approved
@@ -494,7 +518,23 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
                 ).limit(1)
             )
             contact = result.scalars().first()
-            if not contact or contact.status != "approved":
+            if not contact:
+                # Native-TG-only outgoing to a peer that's never sent us
+                # anything → no contact row exists yet. The incoming
+                # listener auto-creates contacts on first inbound message;
+                # we don't mirror that here because outgoing-first contacts
+                # are rare and would invite stale dangling rows. Surface
+                # via the env-gated debug log for diagnosis.
+                if _DEBUG_OUTGOING:
+                    print(f"[OUTGOING] {account.phone}: skip — no contact for peer={peer_tg_id} msg={msg_obj.id}", flush=True)
+                return
+            if contact.status != "approved":
+                if _DEBUG_OUTGOING:
+                    print(
+                        f"[OUTGOING] {account.phone}: skip — contact {contact.id} status={contact.status} "
+                        f"peer={peer_tg_id} msg={msg_obj.id}",
+                        flush=True,
+                    )
                 return
 
             # Skip if message already saved (sent through CRM)
@@ -582,6 +622,12 @@ async def _start_listener(account: TgAccount, client: TelegramClient) -> None:
             contact.last_message_is_read = False
             await db.commit()
             await db.refresh(msg)
+            if _DEBUG_OUTGOING:
+                print(
+                    f"[OUTGOING] {account.phone}: saved native-TG outgoing "
+                    f"contact={contact.id} peer={peer_tg_id} msg={msg_obj.id}",
+                    flush=True,
+                )
 
             # Broadcast to CRM (scoped to this account's org). media_url is
             # an HMAC-signed /media/ path — frontend renders it directly
@@ -1492,8 +1538,11 @@ async def send_message(
         # Unknown Telethon error — re-raise as-is so it surfaces in Sentry
         raise
     # Mark this tg_msg_id as CRM-originated so the outgoing listener
-    # skips it without sleeping.
-    _mark_crm_sent(account_id, result.id)
+    # skips it without sleeping. Tracker key now includes the peer
+    # because Telegram message IDs are per-chat — without the peer
+    # component we'd accidentally suppress the listener for an unrelated
+    # chat that happens to receive a same-numbered native-TG message.
+    _mark_crm_sent(account_id, tg_id, result.id)
     return result.id
 
 
@@ -1520,7 +1569,7 @@ async def send_media_group(
     ids = [getattr(r, 'id', None) or (r.get('id') if isinstance(r, dict) else 0) for r in results]
     for _id in ids:
         if _id:
-            _mark_crm_sent(account_id, _id)
+            _mark_crm_sent(account_id, tg_id, _id)
     return ids
 
 
@@ -1557,7 +1606,7 @@ async def forward_message(
             else:
                 continue
             sent_ids.append(result.id)
-            _mark_crm_sent(account_id, result.id)
+            _mark_crm_sent(account_id, to_tg_id, result.id)
         except Exception as e:
             print(f"[FORWARD] Failed to copy message {tg_msg_id}: {e}")
     return sent_ids

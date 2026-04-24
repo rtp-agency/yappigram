@@ -1154,18 +1154,38 @@ function ChatsContent() {
           // precision than the server, so the next refetch flips the chat's
           // position in the sort — visible as "chats jump then disappear".
           const serverTs = event.message?.created_at || new Date().toISOString();
+          // last_message_is_read drives the "unread dot" / preview style.
+          // Flipping it to false for an outgoing message (e.g. native-TG
+          // mirror) made the contact row look like a NEW unread message
+          // from the recipient — a UX bug that shipped alongside the
+          // outgoing-listener WS broadcast. Only flip for incoming.
+          const flipUnread = msgDir === "incoming";
           return prev
-            .map((c) => c.id === event.contact_id ? { ...c, last_message_at: serverTs, last_message_content: msgPreview.slice(0, 100), last_message_direction: msgDir, last_message_is_read: false } : c);
+            .map((c) => c.id === event.contact_id ? {
+              ...c,
+              last_message_at: serverTs,
+              last_message_content: msgPreview.slice(0, 100),
+              last_message_direction: msgDir,
+              ...(flipUnread ? { last_message_is_read: false } : {}),
+            } : c);
         });
         if (isCurrentChat) {
           setMessages((prev) => {
             if (prev.some((m) => m.id === event.message.id || (m.tg_message_id && m.tg_message_id === event.message.tg_message_id))) return prev;
             return [...prev, event.message];
           });
-          // Mark as read immediately since user is viewing this chat
-          api(`/api/messages/${event.contact_id}/read`, { method: "PATCH" }).catch(console.error);
-        } else {
-          // Mark as unread + increment count
+          // Mark the chat as read only when an INCOMING message arrives —
+          // outgoing messages (e.g. native-TG mirror) shouldn't trigger an
+          // extra read PATCH that races with the user's actual reading.
+          if (event.message?.direction === "incoming") {
+            api(`/api/messages/${event.contact_id}/read`, { method: "PATCH" }).catch(console.error);
+          }
+        } else if (event.message?.direction === "incoming") {
+          // Unread badge + notification toast belong to incoming messages
+          // only. Outgoing messages mirrored from native Telegram (the user
+          // typed in the official app on another device) used to bump unread
+          // and pop a notification for the user's OWN message — visible bug
+          // ever since on_outgoing_message started broadcasting via WS.
           setUnread((prev) => {
             const next = new Map(prev);
             next.set(event.contact_id, (next.get(event.contact_id) || 0) + 1);

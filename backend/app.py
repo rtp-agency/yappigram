@@ -891,6 +891,13 @@ async def on_startup():
                 -- defense-in-depth ("I excluded RD but accidentally ticked a
                 -- contact with RD — server should still drop them").
                 ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS tag_exclude TEXT[] DEFAULT '{}';
+                -- Opt-in inclusion of archived contacts in the recipient set.
+                -- Default false keeps existing broadcasts archived-blind.
+                -- Tags live on contacts regardless of archive state, so a
+                -- tag whose holders all sit in archive used to silently
+                -- yield "0 подходит" with no recourse — flipping this on
+                -- lifts the archive cut for that broadcast.
+                ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS include_archived BOOLEAN NOT NULL DEFAULT FALSE;
                 -- org_id columns for multi-tenancy
                 ALTER TABLE tg_accounts ADD COLUMN IF NOT EXISTS org_id VARCHAR;
                 ALTER TABLE tags ADD COLUMN IF NOT EXISTS org_id VARCHAR;
@@ -960,6 +967,9 @@ async def on_startup():
                 CREATE INDEX IF NOT EXISTS ix_scheduled_messages_status ON scheduled_messages(status) WHERE status = 'pending';
                 CREATE INDEX IF NOT EXISTS ix_staff_postforge_user ON staff(postforge_user_id);
                 CREATE INDEX IF NOT EXISTS ix_messages_media_missing ON messages (contact_id, media_type) WHERE media_type IS NOT NULL AND media_type != 'sticker';
+                -- NB: ix_contacts_tags_gin is built CONCURRENTLY outside this
+                -- DO block (DDL inside DO can't use CONCURRENTLY). See the
+                -- AUTOCOMMIT connection right after this transaction.
                 -- Audit log: extended columns for SOC2-ready trail
                 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS target_id VARCHAR;
                 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS target_type VARCHAR;
@@ -1028,6 +1038,30 @@ async def on_startup():
             CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_contact_tg_msg
             ON messages (contact_id, tg_message_id) WHERE tg_message_id IS NOT NULL
         """))
+
+    # GIN index on contacts.tags built outside the transaction so we can use
+    # CREATE INDEX CONCURRENTLY (which requires its own transaction). Without
+    # CONCURRENTLY a plain CREATE INDEX takes a SHARE lock on contacts, which
+    # blocks new-message inserts from the listener for the duration of the
+    # build — at thousands of contacts/account that can be tens of seconds on
+    # first deploy. Partial: only contacts with at least one tag get indexed,
+    # which materially shrinks the index since plenty of contacts are untagged.
+    # Idempotent (IF NOT EXISTS) and best-effort (any failure is logged but
+    # doesn't crash startup — the broadcast query path still works without
+    # this index, just slower). Nothing else depends on its presence.
+    try:
+        # AUTOCOMMIT isolation lets us run CREATE INDEX CONCURRENTLY which
+        # cannot run inside a transaction block. In SQLAlchemy 2.x async,
+        # AsyncConnection.execution_options IS a coroutine — must await.
+        async with engine.connect() as ac_conn:
+            ac_conn = await ac_conn.execution_options(isolation_level="AUTOCOMMIT")
+            await ac_conn.execute(sa_text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_contacts_tags_gin "
+                "ON contacts USING GIN (tags) WHERE array_length(tags, 1) > 0"
+            ))
+    except Exception as e:
+        print(f"[STARTUP] ix_contacts_tags_gin build skipped: {e}", flush=True)
+
     await startup_listeners()
     asyncio.create_task(start_bot_polling())
     # Auto-sync dialogs for all connected accounts on startup
@@ -4201,6 +4235,7 @@ async def create_broadcast(req: BroadcastCreate, user: CurrentUser, db: DB):
         tg_account_id=req.tg_account_id,
         tag_filter=req.tag_filter,
         tag_exclude=req.tag_exclude or [],
+        include_archived=bool(req.include_archived),
         # Floor raised from 1s → 5s: with the per-account system throttle
         # already capped at ~1 msg/sec, a 1-second user delay meant every
         # broadcast ran right at the Telegram flood threshold. 5 s gives
@@ -4349,6 +4384,17 @@ async def start_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
         else ()
     )
 
+    # Archive cut. Off by default (excludes archived contacts) so the historical
+    # behavior is preserved. When include_archived=True the equality clause is
+    # dropped entirely, so the recipient set covers archived AND non-archived
+    # contacts that match the rest of the filters. Tags exist on contacts
+    # regardless of archive state, so this is the correct knob: opting in
+    # means "these tag-holders count even if they're archived".
+    archive_clause = (
+        () if getattr(bc, "include_archived", False)
+        else (Contact.is_archived.is_(False),)
+    )
+
     if bc.contact_ids:
         # Manual selection — use specified contacts (private only).
         # Validate all contact_ids belong to user's org AND don't carry
@@ -4359,7 +4405,7 @@ async def start_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
                 Contact.tg_account_id.in_(_org_accounts_subq(user)),
                 *base_filter,
                 Contact.status == "approved",
-                Contact.is_archived.is_(False),
+                *archive_clause,
                 *exclude_clause,
             )
         )
@@ -4368,7 +4414,7 @@ async def start_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
         q = select(Contact).where(
             *base_filter,
             Contact.status == "approved",
-            Contact.is_archived.is_(False),
+            *archive_clause,
             *exclude_clause,
         )
         if bc.tag_filter:
@@ -4386,36 +4432,85 @@ async def start_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
         total_in_account = (await db.execute(
             select(func.count()).select_from(Contact).where(*base_filter)
         )).scalar_one() or 0
-        approved_count = (await db.execute(
+        # The "eligible pool" the user is actually drawing from. Reflects
+        # the include_archived choice so the wording matches reality:
+        # without the toggle, "active" excludes archived; with it, they're
+        # included. Otherwise the message reads "ни один из 50 активных"
+        # while archived contacts with the tag exist, which is misleading.
+        eligible_count = (await db.execute(
             select(func.count()).select_from(Contact).where(
-                *base_filter, Contact.status == "approved", Contact.is_archived.is_(False),
+                *base_filter,
+                Contact.status == "approved",
+                *archive_clause,
             )
         )).scalar_one() or 0
+        # When the user picked tags AND didn't opt into archived contacts,
+        # tell them how many archived holders they would have reached if
+        # they flipped the toggle. This is the most common reason for "0
+        # подходит" right after the tag → archive UX confusion the tester
+        # hit. Skip the count when include_archived is already on so we
+        # don't waste a query.
+        archived_with_tag_count = 0
+        if (
+            bc.tag_filter
+            and not getattr(bc, "include_archived", False)
+            and not bc.contact_ids
+        ):
+            archived_with_tag_count = (await db.execute(
+                select(func.count()).select_from(Contact).where(
+                    *base_filter,
+                    Contact.status == "approved",
+                    Contact.is_archived.is_(True),
+                    Contact.tags.overlap(bc.tag_filter),
+                    *exclude_clause,
+                )
+            )).scalar_one() or 0
+
+        def _ru_plural_contacts(n: int) -> str:
+            # Russian plural forms: 1 контакт, 2-4 контакта, 5+ контактов.
+            mod10 = n % 10
+            mod100 = n % 100
+            if mod10 == 1 and mod100 != 11:
+                return "контакт"
+            if 2 <= mod10 <= 4 and not (12 <= mod100 <= 14):
+                return "контакта"
+            return "контактов"
 
         exclude_note = (
             f" Исключающие теги: {', '.join(bc.tag_exclude)}."
             if getattr(bc, "tag_exclude", None)
             else ""
         )
+        archive_hint = (
+            f" В архиве есть ещё {archived_with_tag_count} {_ru_plural_contacts(archived_with_tag_count)} с этими тегами — "
+            f"включите «Включая архивные контакты», чтобы охватить их."
+            if archived_with_tag_count > 0
+            else ""
+        )
+        eligible_label = "активных и архивных" if getattr(bc, "include_archived", False) else "активных"
         if bc.contact_ids:
             reason = (
-                f"Из {len(bc.contact_ids)} выбранных вручную контактов ни один не подходит "
-                f"(не approved, в архиве, не private, удалён или попал под исключающий тег).{exclude_note}"
+                f"Из {len(bc.contact_ids)} выбранных вручную {_ru_plural_contacts(len(bc.contact_ids))} "
+                f"ни один не подходит (не approved, не private, удалён или попал под исключающий тег"
+                f"{'' if getattr(bc, 'include_archived', False) else ', либо в архиве'}).{exclude_note}"
             )
         elif bc.tag_filter:
             reason = (
-                f"Ни один из {approved_count} активных контактов аккаунта не имеет нужных тегов "
-                f"({', '.join(bc.tag_filter)}).{exclude_note}"
+                f"Ни один из {eligible_count} {eligible_label} {_ru_plural_contacts(eligible_count)} аккаунта "
+                f"не имеет нужных тегов ({', '.join(bc.tag_filter)}).{exclude_note}{archive_hint}"
             )
         elif total_in_account == 0:
             reason = "У этого TG-аккаунта вообще нет контактов. Сначала синхронизируйте диалоги."
-        elif approved_count == 0:
+        elif eligible_count == 0:
             reason = (
-                f"В аккаунте {total_in_account} контактов, но ни один не помечен как approved "
-                f"(все в архиве/blocked/pending)."
+                f"В аккаунте {total_in_account} {_ru_plural_contacts(total_in_account)}, "
+                f"но ни один не помечен как approved (все в архиве/blocked/pending)."
             )
         else:
-            reason = f"В аккаунте {approved_count} активных контактов, но фильтр их отсеял."
+            reason = (
+                f"В аккаунте {eligible_count} {eligible_label} {_ru_plural_contacts(eligible_count)}, "
+                f"но фильтр их отсеял."
+            )
 
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Получателей не найдено. {reason}")
 
@@ -4476,6 +4571,7 @@ async def update_broadcast(broadcast_id: UUID, req: BroadcastCreate, user: Curre
     bc.tg_account_id = req.tg_account_id
     bc.tag_filter = req.tag_filter
     bc.tag_exclude = req.tag_exclude or []
+    bc.include_archived = bool(req.include_archived)
     bc.delay_seconds = max(5, min(3600, req.delay_seconds))
     bc.max_recipients = req.max_recipients
     bc.contact_ids = req.contact_ids or []

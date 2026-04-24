@@ -731,6 +731,9 @@ export interface Broadcast {
   tg_account_id: string;
   tag_filter: string[];
   tag_exclude: string[];
+  // When true the recipient builder lifts the is_archived=false cut, so a
+  // tag whose holders all sit in archive can still be reached.
+  include_archived?: boolean;
   max_recipients: number | null;
   contact_ids: string[];
   delay_seconds: number;
@@ -755,6 +758,7 @@ export async function createBroadcast(data: {
   tg_account_id: string;
   tag_filter?: string[];
   tag_exclude?: string[];
+  include_archived?: boolean;
   delay_seconds?: number;
   max_recipients?: number;
   contact_ids?: string[];

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   api,
   getBroadcasts,
@@ -35,6 +35,9 @@ function BroadcastsContent() {
   const [accounts, setAccounts] = useState<TgAccount[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [archivedContacts, setArchivedContacts] = useState<Contact[]>([]);
+  const [archivedLoaded, setArchivedLoaded] = useState(false);
+  const [archivedLoading, setArchivedLoading] = useState(false);
 
   // Create form
   const [title, setTitle] = useState("");
@@ -53,6 +56,11 @@ function BroadcastsContent() {
   // In tags mode, flip this on to cherry-pick contacts FROM within the
   // tag-filtered set instead of sending to everyone matching the tags.
   const [cherryPick, setCherryPick] = useState(false);
+  // When on, archived contacts are eligible for the recipient set. Tags
+  // sit on contacts regardless of archive state, so this lets a "tag-only
+  // in-archive" cohort still be reached. Default off — preserves the
+  // historical behavior, prevents accidental bulk-send to archived chats.
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [maxRecipients, setMaxRecipients] = useState(20);
   const [manualContacts, setManualContacts] = useState<Set<string>>(new Set());
   const [contactSearch, setContactSearch] = useState("");
@@ -75,6 +83,36 @@ function BroadcastsContent() {
     api("/api/tags").then(setTags).catch(console.error);
     api("/api/contacts?status=approved").then(setContacts).catch(console.error);
   }, []);
+
+  // Lazy-load archived contacts on demand. Most users never tick the
+  // "включая архивные" checkbox, so we don't pay the second /api/contacts
+  // request unless they actually opt in. Cached for the lifetime of the
+  // mounted component.
+  //
+  // Cleanup flag guards against the user closing the modal (or navigating
+  // away) before the request lands — without it, the late then() would
+  // call setArchivedContacts on an unmounted component and React would
+  // warn in dev. Errors don't latch archivedLoaded, so the next toggle
+  // re-attempts the load.
+  useEffect(() => {
+    if (!includeArchived || archivedLoaded || archivedLoading) return;
+    let cancelled = false;
+    setArchivedLoading(true);
+    api("/api/contacts?status=approved&archived=true")
+      .then((data: Contact[]) => {
+        if (cancelled) return;
+        setArchivedContacts(data);
+        setArchivedLoaded(true);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        console.error("Failed to load archived contacts", e);
+      })
+      .finally(() => {
+        if (!cancelled) setArchivedLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [includeArchived, archivedLoaded, archivedLoading]);
 
   useEffect(() => {
     const unsub = onWSEvent((event) => {
@@ -100,6 +138,36 @@ function BroadcastsContent() {
     return unsub;
   }, []);
 
+  // Drop any manual-pick IDs that aren't in the currently eligible
+  // pool. Avoids persisting "phantom" IDs the server would silently
+  // skip at send time (e.g. user picked archived contacts, then turned
+  // off include_archived without unchecking them).
+  //
+  // CAVEAT: if the user just opened an edit modal for a broadcast with
+  // include_archived=ON and archived contacts haven't lazy-loaded yet,
+  // the eligible pool is incomplete and we MUST NOT drop those IDs —
+  // doing so would silently lose legitimately-saved archived picks.
+  // We only sanitize when we're confident the pool is complete:
+  //   - includeArchived=false → pool is by definition non-archived only, complete
+  //   - includeArchived=true + archivedLoaded → both halves loaded
+  // While archived is still loading we return all IDs as "kept" with
+  // dropped=0 (no warning). The next save attempt after the load
+  // completes will sanitize correctly.
+  const sanitizeManualContacts = (): { kept: string[]; dropped: number } => {
+    const poolComplete = !includeArchived || archivedLoaded;
+    if (!poolComplete) {
+      return { kept: Array.from(manualContacts), dropped: 0 };
+    }
+    const eligible = new Set(privateContacts.map((c) => c.id));
+    const kept: string[] = [];
+    let dropped = 0;
+    manualContacts.forEach((id) => {
+      if (eligible.has(id)) kept.push(id);
+      else dropped += 1;
+    });
+    return { kept, dropped };
+  };
+
   const handleCreate = async () => {
     if (!title.trim() || !selectedAccount) return;
     setCreating(true);
@@ -112,16 +180,27 @@ function BroadcastsContent() {
       // Cherry-pick requires at least one include tag actually selected —
       // otherwise the UI block is hidden and the user's old picks would
       // get silently submitted as a manual-mode broadcast.
-      const useCherryPick = recipientMode === "tags" && cherryPick && manualContacts.size > 0 && selectedTags.length > 0;
+      const sanitized = sanitizeManualContacts();
+      const useCherryPick = recipientMode === "tags" && cherryPick && sanitized.kept.length > 0 && selectedTags.length > 0;
+      if (sanitized.dropped > 0 && (recipientMode === "manual" || useCherryPick)) {
+        const ok = confirm(
+          `${sanitized.dropped} выбранных контактов не входят в текущий фильтр (например, архивные при выключенном «Включая архивные»). ` +
+          `Они будут исключены из рассылки. Продолжить?`,
+        );
+        if (!ok) { setCreating(false); return; }
+      }
       let bc = await createBroadcast({
         title: title.trim(),
         content: content.trim() || undefined,
         tg_account_id: selectedAccount,
         tag_filter: (recipientMode === "tags" || recipientMode === "random") ? selectedTags : [],
         tag_exclude: recipientMode === "all" ? [] : excludedTags,
+        // Persist the toggle for ALL modes — manual selection of an
+        // archived contact is otherwise silently dropped server-side.
+        include_archived: includeArchived,
         delay_seconds: Math.max(BROADCAST_MIN_DELAY, delay),
         max_recipients: (recipientMode === "random") ? maxRecipients : undefined,
-        contact_ids: recipientMode === "manual" || useCherryPick ? Array.from(manualContacts) : [],
+        contact_ids: recipientMode === "manual" || useCherryPick ? sanitized.kept : [],
       });
       // Upload media if selected
       if (mediaFile) {
@@ -140,6 +219,7 @@ function BroadcastsContent() {
       setShowCreate(false);
       setTitle(""); setContent(""); setSelectedTags([]); setExcludedTags([]);
       setManualContacts(new Set()); setCherryPick(false);
+      setIncludeArchived(false);
       setRecipientMode("all"); setMediaFile(null); setSendAs("auto"); setUploadedMedia(null);
       setDelay(BROADCAST_MIN_DELAY);
     } catch (e: any) { alert(e.message); }
@@ -182,6 +262,7 @@ function BroadcastsContent() {
     setSelectedAccount(bc.tg_account_id);
     setSelectedTags(bc.tag_filter || []);
     setExcludedTags(bc.tag_exclude || []);
+    setIncludeArchived(!!bc.include_archived);
     // Clamp: any grandfathered draft saved with delay < 5 gets bumped
     // to the new floor when reopened for editing.
     setDelay(Math.max(BROADCAST_MIN_DELAY, bc.delay_seconds));
@@ -218,7 +299,15 @@ function BroadcastsContent() {
       // Cherry-pick requires at least one include tag actually selected —
       // otherwise the UI block is hidden and the user's old picks would
       // get silently submitted as a manual-mode broadcast.
-      const useCherryPick = recipientMode === "tags" && cherryPick && manualContacts.size > 0 && selectedTags.length > 0;
+      const sanitized = sanitizeManualContacts();
+      const useCherryPick = recipientMode === "tags" && cherryPick && sanitized.kept.length > 0 && selectedTags.length > 0;
+      if (sanitized.dropped > 0 && (recipientMode === "manual" || useCherryPick)) {
+        const ok = confirm(
+          `${sanitized.dropped} выбранных контактов не входят в текущий фильтр (например, архивные при выключенном «Включая архивные»). ` +
+          `Они будут удалены из рассылки. Продолжить?`,
+        );
+        if (!ok) { setCreating(false); return; }
+      }
       const updated = await api(`/api/broadcasts/${editingBroadcast.id}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -227,9 +316,10 @@ function BroadcastsContent() {
           tg_account_id: selectedAccount,
           tag_filter: (recipientMode === "tags" || recipientMode === "random") ? selectedTags : [],
           tag_exclude: recipientMode === "all" ? [] : excludedTags,
+          include_archived: includeArchived,
           delay_seconds: Math.max(BROADCAST_MIN_DELAY, delay),
           max_recipients: recipientMode === "random" ? maxRecipients : null,
-          contact_ids: recipientMode === "manual" || useCherryPick ? Array.from(manualContacts) : [],
+          contact_ids: recipientMode === "manual" || useCherryPick ? sanitized.kept : [],
         }),
       });
       setBroadcasts((prev) => prev.map((bc) => (bc.id === editingBroadcast.id ? updated : bc)));
@@ -237,6 +327,7 @@ function BroadcastsContent() {
       setEditingBroadcast(null);
       setTitle(""); setContent(""); setSelectedTags([]); setExcludedTags([]);
       setManualContacts(new Set()); setCherryPick(false);
+      setIncludeArchived(false);
     } catch (e: any) { alert(e.message); }
     setCreating(false);
   };
@@ -250,10 +341,37 @@ function BroadcastsContent() {
     completed: "Завершено", cancelled: "Отменено", failed: "Сбой",
   };
 
-  const privateContacts = contacts.filter((c) => c.chat_type === "private" && !c.is_archived);
-  const filteredManualContacts = privateContacts.filter((c) =>
+  // When the user opts into archived contacts, merge the lazy-loaded
+  // archived list into the eligible pool. Otherwise behave exactly as
+  // before: only non-archived.
+  //
+  // Both pools are scoped to the currently selected TG account — without
+  // this filter, a user with multiple accounts would see contacts from
+  // OTHER accounts in the cherry-pick list, even though the broadcast can
+  // only target the chosen tg_account_id (server would silently drop them
+  // anyway). Memoized so spreading the two arrays doesn't re-run filters
+  // on every keystroke / WS event.
+  const privateContacts = useMemo(() => {
+    const inAccount = (c: Contact) => !selectedAccount || c.tg_account_id === selectedAccount;
+    const nonArchived = contacts.filter((c) => c.chat_type === "private" && !c.is_archived && inAccount(c));
+    if (!includeArchived) return nonArchived;
+    const archived = archivedContacts.filter((c) => c.chat_type === "private" && c.is_archived && inAccount(c));
+    return [...nonArchived, ...archived];
+  }, [contacts, archivedContacts, includeArchived, selectedAccount]);
+  const filteredManualContacts = useMemo(() => privateContacts.filter((c) =>
     !contactSearch || c.alias.toLowerCase().includes(contactSearch.toLowerCase())
-  );
+  ), [privateContacts, contactSearch]);
+  // Tag-matching pool for the cherry-pick block. Pre-computing here
+  // (instead of in the JSX IIFE) keeps the filter from re-running on
+  // every keystroke / WS event when neither tags nor the contact pool
+  // changed. Dropped from work when not in tags mode.
+  const matchingContacts = useMemo(() => {
+    if (recipientMode !== "tags" || selectedTags.length === 0) return [];
+    return privateContacts.filter((c) =>
+      c.tags?.some((t) => selectedTags.includes(t)) &&
+      !c.tags?.some((t) => excludedTags.includes(t))
+    );
+  }, [privateContacts, recipientMode, selectedTags, excludedTags]);
 
   const modeLabels: Record<RecipientMode, string> = {
     all: "Все контакты",
@@ -356,6 +474,26 @@ function BroadcastsContent() {
             </div>
           </div>
 
+          {/* Archive opt-in. Off by default keeps the historical behavior
+              (archived chats are skipped). Tags exist on contacts regardless
+              of archive state, so flipping this on lets a tag whose holders
+              all sit in archive still be reached. */}
+          <div>
+            <label className="flex items-center gap-2 text-sm text-slate-400 font-medium cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeArchived}
+                onChange={(e) => setIncludeArchived(e.target.checked)}
+                className="accent-brand"
+              />
+              Включая архивные контакты
+              {archivedLoading && <span className="text-[10px] text-slate-500">загрузка...</span>}
+            </label>
+            <p className="text-[10px] text-slate-500 mt-0.5 ml-6">
+              Если выключено — архивные диалоги пропускаются, даже если у них есть нужный тег.
+            </p>
+          </div>
+
           {/* Tag INCLUDE filter (for tags & random modes) */}
           {(recipientMode === "tags" || recipientMode === "random") && tags.length > 0 && (
             <div>
@@ -425,10 +563,6 @@ function BroadcastsContent() {
           {/* Cherry-pick toggle — in tags mode, lets the user pick individual
               contacts out of the tag-matching set instead of sending to all. */}
           {recipientMode === "tags" && selectedTags.length > 0 && (() => {
-            const matchingContacts = privateContacts.filter((c) =>
-              c.tags?.some((t) => selectedTags.includes(t)) &&
-              !c.tags?.some((t) => excludedTags.includes(t))
-            );
             const filtered = matchingContacts.filter((c) =>
               !contactSearch || c.alias.toLowerCase().includes(contactSearch.toLowerCase())
             );
@@ -473,6 +607,9 @@ function BroadcastsContent() {
                             })}
                             className="accent-brand" />
                           <span className="text-sm">{c.alias}</span>
+                          {c.is_archived && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400">архив</span>
+                          )}
                           {c.tags?.length > 0 && (
                             <span className="text-[10px] text-slate-500">{c.tags.join(", ")}</span>
                           )}
@@ -524,6 +661,9 @@ function BroadcastsContent() {
                       })}
                       className="accent-brand" />
                     <span className="text-sm">{c.alias}</span>
+                    {c.is_archived && (
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400">архив</span>
+                    )}
                     {c.tags?.length > 0 && (
                       <span className="text-[10px] text-slate-500">{c.tags.join(", ")}</span>
                     )}
@@ -556,7 +696,7 @@ function BroadcastsContent() {
               setShowCreate(false); setEditingBroadcast(null);
               setTitle(""); setContent("");
               setSelectedTags([]); setExcludedTags([]); setManualContacts(new Set());
-              setCherryPick(false); setRecipientMode("all");
+              setCherryPick(false); setIncludeArchived(false); setRecipientMode("all");
               setDelay(BROADCAST_MIN_DELAY); setMediaFile(null); setSendAs("auto"); setUploadedMedia(null);
             }}>Отмена</Button>
             <Button onClick={editingBroadcast ? handleSaveEdit : handleCreate} disabled={creating || !title.trim() || !selectedAccount ||
@@ -624,7 +764,7 @@ function BroadcastsContent() {
                   </div>
                 </div>
               )}
-              {(bc.tag_filter.length > 0 || (bc.tag_exclude?.length ?? 0) > 0) && (
+              {(bc.tag_filter.length > 0 || (bc.tag_exclude?.length ?? 0) > 0 || bc.include_archived) && (
                 <div className="flex gap-1 mt-2 flex-wrap">
                   {bc.tag_filter.map((t) => (
                     <span key={`inc-${t}`} className="text-[10px] px-1.5 py-0.5 rounded bg-surface-hover text-slate-400">
@@ -636,6 +776,11 @@ function BroadcastsContent() {
                       ✗ {t}
                     </span>
                   ))}
+                  {bc.include_archived && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                      📦 +архив
+                    </span>
+                  )}
                 </div>
               )}
               {bc.last_error && (
