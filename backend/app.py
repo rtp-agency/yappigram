@@ -5897,7 +5897,7 @@ async def internal_postforge_contact_upsert(
     postforge_campaign_id (don't overwrite other fields). If not — create
     a minimal contact row.
     """
-    from .telegram import generate_alias as _gen_alias
+    from telegram import generate_alias as _gen_alias
     from uuid import UUID as _UUID
 
     try:
