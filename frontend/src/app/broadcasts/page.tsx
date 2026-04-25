@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   getBroadcasts,
@@ -35,9 +35,16 @@ function BroadcastsContent() {
   const [accounts, setAccounts] = useState<TgAccount[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [archivedContacts, setArchivedContacts] = useState<Contact[]>([]);
-  const [archivedLoaded, setArchivedLoaded] = useState(false);
-  const [archivedLoading, setArchivedLoading] = useState(false);
+  // Archived contacts cached per tg_account_id. Lazy-loaded only when the
+  // user opts into "включая архивные" with that account selected. Switching
+  // accounts triggers a fresh fetch for the new one if not already cached.
+  const [archivedByAccount, setArchivedByAccount] = useState<Record<string, Contact[]>>({});
+  const [archivedLoadingFor, setArchivedLoadingFor] = useState<string | null>(null);
+  // In-flight fetch tracker. useRef instead of useState because we DON'T want
+  // setting/clearing this to trigger an effect re-run — that's exactly what
+  // killed the previous version (cleanup ran with cancelled=true before the
+  // fetch resolved → finally never reset loading → eternal "загрузка...").
+  const archivedFetchInFlight = useRef<Set<string>>(new Set());
 
   // Create form
   const [title, setTitle] = useState("");
@@ -84,35 +91,61 @@ function BroadcastsContent() {
     api("/api/contacts?status=approved").then(setContacts).catch(console.error);
   }, []);
 
-  // Lazy-load archived contacts on demand. Most users never tick the
-  // "включая архивные" checkbox, so we don't pay the second /api/contacts
-  // request unless they actually opt in. Cached for the lifetime of the
-  // mounted component.
+  // Lazy-load archived contacts on demand, scoped to the currently
+  // selected TG account.
   //
-  // Cleanup flag guards against the user closing the modal (or navigating
-  // away) before the request lands — without it, the late then() would
-  // call setArchivedContacts on an unmounted component and React would
-  // warn in dev. Errors don't latch archivedLoaded, so the next toggle
-  // re-attempts the load.
+  // Two design choices that matter:
+  //  1. Per-account scope (?tg_account_id=...) — /api/contacts without
+  //     account filter returns archived chats across the whole org. With
+  //     thousands of contacts and dozens of accounts that's seconds of
+  //     network + JSON parse for data the user can't even broadcast to
+  //     (a broadcast targets exactly one account). The narrower request
+  //     is what the chats page already does.
+  //  2. useRef in-flight tracker (NOT useState) — the previous version
+  //     had `archivedLoading` in the effect deps; setArchivedLoading(true)
+  //     re-triggered the effect, the cleanup set cancelled=true on the
+  //     just-started fetch, and the .finally() then no-op'd because
+  //     cancelled was true. Loading state stuck on forever. The real
+  //     in-flight signal must NOT live in deps.
+  //
+  // Cache key is tg_account_id. Switching accounts triggers a fresh
+  // fetch for the new one; previously-loaded accounts stay cached.
   useEffect(() => {
-    if (!includeArchived || archivedLoaded || archivedLoading) return;
+    if (!includeArchived || !selectedAccount) return;
+    if (archivedByAccount[selectedAccount]) return; // cached
+    if (archivedFetchInFlight.current.has(selectedAccount)) return;
+
+    const acctId = selectedAccount;
+    archivedFetchInFlight.current.add(acctId);
+    setArchivedLoadingFor(acctId);
     let cancelled = false;
-    setArchivedLoading(true);
-    api("/api/contacts?status=approved&archived=true")
+
+    api(`/api/contacts?status=approved&archived=true&tg_account_id=${encodeURIComponent(acctId)}`)
       .then((data: Contact[]) => {
         if (cancelled) return;
-        setArchivedContacts(data);
-        setArchivedLoaded(true);
+        setArchivedByAccount((prev) => ({ ...prev, [acctId]: data }));
       })
       .catch((e: any) => {
         if (cancelled) return;
         console.error("Failed to load archived contacts", e);
       })
       .finally(() => {
-        if (!cancelled) setArchivedLoading(false);
+        archivedFetchInFlight.current.delete(acctId);
+        if (cancelled) return;
+        // Only clear the loading marker if it's still pointing at THIS
+        // fetch (account may have changed during the request).
+        setArchivedLoadingFor((curr) => (curr === acctId ? null : curr));
       });
+
     return () => { cancelled = true; };
-  }, [includeArchived, archivedLoaded, archivedLoading]);
+  }, [includeArchived, selectedAccount, archivedByAccount]);
+
+  // Derived state for the rest of the component — keeps the rest of the
+  // file readable as if archivedContacts/archivedLoading were plain values.
+  const archivedContacts = selectedAccount
+    ? (archivedByAccount[selectedAccount] || [])
+    : [];
+  const archivedLoading = archivedLoadingFor === selectedAccount && !!selectedAccount;
 
   useEffect(() => {
     const unsub = onWSEvent((event) => {
@@ -144,17 +177,18 @@ function BroadcastsContent() {
   // off include_archived without unchecking them).
   //
   // CAVEAT: if the user just opened an edit modal for a broadcast with
-  // include_archived=ON and archived contacts haven't lazy-loaded yet,
-  // the eligible pool is incomplete and we MUST NOT drop those IDs —
-  // doing so would silently lose legitimately-saved archived picks.
-  // We only sanitize when we're confident the pool is complete:
-  //   - includeArchived=false → pool is by definition non-archived only, complete
-  //   - includeArchived=true + archivedLoaded → both halves loaded
-  // While archived is still loading we return all IDs as "kept" with
-  // dropped=0 (no warning). The next save attempt after the load
+  // include_archived=ON and the archived list for the currently selected
+  // account hasn't lazy-loaded yet, the eligible pool is incomplete and
+  // we MUST NOT drop those IDs — doing so would silently lose legitimately
+  // saved archived picks. The pool is "complete" when:
+  //   - includeArchived=false → pool is by definition non-archived only
+  //   - includeArchived=true → archived for selectedAccount is cached
+  // While the archived fetch is still in flight we return all IDs as
+  // "kept" with dropped=0 (no warning). The next save after the load
   // completes will sanitize correctly.
   const sanitizeManualContacts = (): { kept: string[]; dropped: number } => {
-    const poolComplete = !includeArchived || archivedLoaded;
+    const archivedReady = !!selectedAccount && !!archivedByAccount[selectedAccount];
+    const poolComplete = !includeArchived || archivedReady;
     if (!poolComplete) {
       return { kept: Array.from(manualContacts), dropped: 0 };
     }
@@ -355,9 +389,12 @@ function BroadcastsContent() {
     const inAccount = (c: Contact) => !selectedAccount || c.tg_account_id === selectedAccount;
     const nonArchived = contacts.filter((c) => c.chat_type === "private" && !c.is_archived && inAccount(c));
     if (!includeArchived) return nonArchived;
-    const archived = archivedContacts.filter((c) => c.chat_type === "private" && c.is_archived && inAccount(c));
+    const acctArchived = selectedAccount ? (archivedByAccount[selectedAccount] || []) : [];
+    const archived = acctArchived.filter((c) => c.chat_type === "private" && c.is_archived && inAccount(c));
     return [...nonArchived, ...archived];
-  }, [contacts, archivedContacts, includeArchived, selectedAccount]);
+    // archivedByAccount keyed on selectedAccount — both must be deps so a
+    // freshly-fetched account's archived list is picked up.
+  }, [contacts, archivedByAccount, includeArchived, selectedAccount]);
   const filteredManualContacts = useMemo(() => privateContacts.filter((c) =>
     !contactSearch || c.alias.toLowerCase().includes(contactSearch.toLowerCase())
   ), [privateContacts, contactSearch]);
@@ -452,7 +489,14 @@ function BroadcastsContent() {
               <label className="text-sm text-slate-400 font-medium block mb-1.5">Telegram аккаунт</label>
               <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}
                 className="w-full bg-surface border border-surface-border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-brand/50">
-                {accounts.map((acc) => <option key={acc.id} value={acc.id}>{acc.phone}</option>)}
+                {/* Show project display_name when set, fallback to phone.
+                    Phone is appended in parens so users with multiple accounts
+                    under the same project label can still tell them apart. */}
+                {accounts.map((acc) => (
+                  <option key={acc.id} value={acc.id}>
+                    {acc.display_name ? `${acc.display_name} (${acc.phone})` : acc.phone}
+                  </option>
+                ))}
               </select>
             </div>
           )}

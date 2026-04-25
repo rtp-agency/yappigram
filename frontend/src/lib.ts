@@ -575,6 +575,7 @@ export async function fetchTgStatus(): Promise<TgStatusAccount[]> {
 export interface TgAccount {
   id: string;
   phone: string;
+  display_name: string | null;
   is_active: boolean;
   connected_at: string;
 }
