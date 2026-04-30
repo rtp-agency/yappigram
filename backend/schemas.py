@@ -329,13 +329,26 @@ class BroadcastOut(BaseModel):
 class BroadcastRecipientOut(BaseModel):
     """Single recipient row for the broadcast stats panel.
 
-    `contact_alias` is the public-facing alias (never decrypted real
-    name) — same field the chat list shows. `error` is populated only
-    on `status="failed"` rows. Returned by GET /api/broadcasts/{id}
-    /recipients in display order (failed → sent → pending).
+    `contact_alias` is the auto-generated CRM-public label (e.g.
+    "да-4719"). `real_name` / `real_username` are decrypted from the
+    encrypted columns and gated by `TgAccount.show_real_names` —
+    populated only for accounts where the org admin opted in to real-
+    names display (same contract as the chat list at /api/contacts).
+    `real_tg_id` is the user's plain Telegram ID; never encrypted, but
+    we still keep it gated by show_real_names because exposing the
+    bare ID lets an operator look the user up externally.
+
+    Frontend display priority:
+      real_username || real_name || alias  (the human-readable label)
+      + real_tg_id  (the disambiguation suffix)
+    All three real_* fields drop to None on accounts that didn't opt
+    in — frontend then falls back to alias-only behavior.
     """
     contact_id: UUID
     contact_alias: str
+    real_name: str | None = None
+    real_username: str | None = None
+    real_tg_id: int | None = None
     status: str
     sent_at: datetime | None = None
     error: str | None = None

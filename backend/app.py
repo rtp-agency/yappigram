@@ -4635,9 +4635,14 @@ async def list_broadcast_recipients(broadcast_id: UUID, user: CurrentUser, db: D
 
     Sort order matches the operator's debugging flow: failed rows first
     (the ones they need to act on), then sent (in reverse-chronological
-    so the latest landed message floats up), then still-pending. Aliases
-    only — never decrypted real names. The stats panel is debug data,
-    not a contact reveal surface.
+    so the latest landed message floats up), then still-pending.
+
+    Real-name display follows the existing org contract: decrypted only
+    for TgAccounts whose `show_real_names` flag is on. Otherwise the
+    panel falls back to the alias (e.g. "да-4719"). Same gate as the
+    main chat list — see app.py around line 1851. `real_tg_id` is plain
+    text in DB but still gated, since the bare ID lets an operator look
+    up the user externally.
     """
     bc_result = await db.execute(select(Broadcast).where(
         Broadcast.id == broadcast_id,
@@ -4647,9 +4652,17 @@ async def list_broadcast_recipients(broadcast_id: UUID, user: CurrentUser, db: D
     if not bc:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
+    # Per-account show_real_names map for the org. Same shape as the
+    # /api/contacts handler. Cheap one-shot query — typical org has
+    # 1-3 accounts.
+    show_real_q = await db.execute(
+        select(TgAccount.id, TgAccount.show_real_names).where(TgAccount.org_id == _org_id(user))
+    )
+    show_real_map = {row[0]: row[1] for row in show_real_q.all()}
+
     from sqlalchemy import case
     rows = await db.execute(
-        select(BroadcastRecipient, Contact.alias)
+        select(BroadcastRecipient, Contact)
         .join(Contact, Contact.id == BroadcastRecipient.contact_id)
         .where(BroadcastRecipient.broadcast_id == broadcast_id)
         .order_by(
@@ -4662,16 +4675,33 @@ async def list_broadcast_recipients(broadcast_id: UUID, user: CurrentUser, db: D
             BroadcastRecipient.sent_at.desc().nullslast(),
         )
     )
-    return [
-        BroadcastRecipientOut(
+
+    out: list[BroadcastRecipientOut] = []
+    for r, contact in rows.all():
+        real_name: str | None = None
+        real_username: str | None = None
+        real_tg_id: int | None = None
+        if show_real_map.get(contact.tg_account_id, False):
+            try:
+                real_name = decrypt(contact.real_name_encrypted) if contact.real_name_encrypted else None
+            except Exception:
+                real_name = None
+            try:
+                real_username = decrypt(contact.real_username_encrypted) if contact.real_username_encrypted else None
+            except Exception:
+                real_username = None
+            real_tg_id = contact.real_tg_id
+        out.append(BroadcastRecipientOut(
             contact_id=r.contact_id,
-            contact_alias=alias,
+            contact_alias=contact.alias,
+            real_name=real_name,
+            real_username=real_username,
+            real_tg_id=real_tg_id,
             status=r.status,
             sent_at=r.sent_at,
             error=r.error,
-        )
-        for r, alias in rows.all()
-    ]
+        ))
+    return out
 
 
 async def _run_broadcast(broadcast_id: UUID):

@@ -85,6 +85,9 @@ function BroadcastsContent() {
   type Recipient = {
     contact_id: string;
     contact_alias: string;
+    real_name: string | null;
+    real_username: string | null;
+    real_tg_id: number | null;
     status: string;
     sent_at: string | null;
     error: string | null;
@@ -816,23 +819,6 @@ function BroadcastsContent() {
                   {(bc.status === "running" || bc.status === "paused") && (
                     <Button variant="danger" onClick={() => handleCancel(bc.id)}>Отменить</Button>
                   )}
-                  {/* "Статистика" — toggles the per-recipient breakdown
-                      panel below the card. Visible for any broadcast that
-                      has at least one recipient row (i.e. has been started
-                      at some point). Drafts have nothing to show. */}
-                  {bc.total_recipients > 0 && (
-                    <Button
-                      variant={statsOpenId === bc.id ? "secondary" : "ghost"}
-                      onClick={() => toggleStats(bc.id)}
-                    >
-                      <svg className="w-3.5 h-3.5 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="20" x2="18" y2="10"/>
-                        <line x1="12" y1="20" x2="12" y2="4"/>
-                        <line x1="6" y1="20" x2="6" y2="14"/>
-                      </svg>
-                      Статистика
-                    </Button>
-                  )}
                   {bc.status !== "running" && (
                     <Button variant="ghost" onClick={() => handleDelete(bc.id)}>
                       <svg className="w-3.5 h-3.5 text-red-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
@@ -911,8 +897,30 @@ function BroadcastsContent() {
                   <div className="break-words">{bc.last_error}</div>
                 </div>
               )}
-              <div className="text-[10px] text-slate-600 mt-2">
-                {new Date(bc.created_at).toLocaleString()} | Задержка: {bc.delay_seconds}с
+              <div className="text-[10px] text-slate-600 mt-2 flex items-center gap-2 flex-wrap">
+                <span>{new Date(bc.created_at).toLocaleString()} | Задержка: {bc.delay_seconds}с</span>
+                {/* Mini "Статистика" toggle — placed inline with the date
+                    row per operator preference (was top-right action area
+                    before; moved here for visual hierarchy and to make it
+                    one-of-the-meta-strip rather than a primary action).
+                    Visible only when there are recipients to show. */}
+                {bc.total_recipients > 0 && (
+                  <button
+                    onClick={() => toggleStats(bc.id)}
+                    className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                      statsOpenId === bc.id
+                        ? "border-brand/50 bg-brand/10 text-brand"
+                        : "border-surface-border text-slate-500 hover:text-slate-300 hover:border-slate-500"
+                    }`}
+                  >
+                    <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="20" x2="18" y2="10"/>
+                      <line x1="12" y1="20" x2="12" y2="4"/>
+                      <line x1="6" y1="20" x2="6" y2="14"/>
+                    </svg>
+                    Статистика
+                  </button>
+                )}
               </div>
               {/* Stats panel — inline expand. Loaded lazily on first
                   open via /api/broadcasts/{id}/recipients, cached for
@@ -943,34 +951,53 @@ function BroadcastsContent() {
                         )
                       </div>
                       <div className="max-h-72 overflow-y-auto space-y-1">
-                        {recipientsCache[bc.id]!.map((r) => (
-                          <div
-                            key={r.contact_id}
-                            className="flex items-center justify-between gap-3 text-[11px] py-1 px-2 rounded hover:bg-surface-hover"
-                          >
-                            <span className="font-mono text-slate-300 truncate" title={r.contact_alias}>
-                              {r.contact_alias}
-                            </span>
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                              {r.status === "sent" && (
-                                <>
-                                  <span className="text-emerald-400">✓ отправлено</span>
-                                  {r.sent_at && (
-                                    <span className="text-slate-500">
-                                      {new Date(r.sent_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                                    </span>
-                                  )}
-                                </>
-                              )}
-                              {r.status === "failed" && (
-                                <span className="text-red-400 max-w-[260px] truncate" title={r.error || "Ошибка"}>
-                                  ✗ {r.error || "ошибка"}
-                                </span>
-                              )}
-                              {r.status === "pending" && <span className="text-amber-400">⏳ ожидает</span>}
+                        {recipientsCache[bc.id]!.map((r) => {
+                          // Display priority: prefer real_username (the
+                          // TG @-handle), then real_name, then alias.
+                          // The real_* fields are populated only on TG
+                          // accounts whose show_real_names flag is on —
+                          // otherwise we fall through to the alias.
+                          // Suffix is the bare TG ID when available, or
+                          // the system-generated alias as disambiguator.
+                          const primaryLabel =
+                            (r.real_username && `@${r.real_username}`) ||
+                            r.real_name ||
+                            r.contact_alias;
+                          const suffix = r.real_tg_id != null
+                            ? `id ${r.real_tg_id}`
+                            : (primaryLabel !== r.contact_alias ? r.contact_alias : null);
+                          return (
+                            <div
+                              key={r.contact_id}
+                              className="flex items-center justify-between gap-3 text-[11px] py-1 px-2 rounded hover:bg-surface-hover"
+                            >
+                              <span className="text-slate-300 truncate flex items-center gap-2" title={primaryLabel}>
+                                <span className="font-mono">{primaryLabel}</span>
+                                {suffix && (
+                                  <span className="text-[10px] text-slate-500">· {suffix}</span>
+                                )}
+                              </span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                {r.status === "sent" && (
+                                  <>
+                                    <span className="text-emerald-400">✓ отправлено</span>
+                                    {r.sent_at && (
+                                      <span className="text-slate-500">
+                                        {new Date(r.sent_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                      </span>
+                                    )}
+                                  </>
+                                )}
+                                {r.status === "failed" && (
+                                  <span className="text-red-400 max-w-[260px] truncate" title={r.error || "Ошибка"}>
+                                    ✗ {r.error || "ошибка"}
+                                  </span>
+                                )}
+                                {r.status === "pending" && <span className="text-amber-400">⏳ ожидает</span>}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </>
                   )}
