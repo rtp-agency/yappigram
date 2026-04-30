@@ -326,6 +326,21 @@ class BroadcastOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BroadcastRecipientOut(BaseModel):
+    """Single recipient row for the broadcast stats panel.
+
+    `contact_alias` is the public-facing alias (never decrypted real
+    name) — same field the chat list shows. `error` is populated only
+    on `status="failed"` rows. Returned by GET /api/broadcasts/{id}
+    /recipients in display order (failed → sent → pending).
+    """
+    contact_id: UUID
+    contact_alias: str
+    status: str
+    sent_at: datetime | None = None
+    error: str | None = None
+
+
 # --- Staff extended ---
 
 class StaffUpdate(BaseModel):

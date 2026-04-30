@@ -79,6 +79,39 @@ function BroadcastsContent() {
   const [creating, setCreating] = useState(false);
   const [editingBroadcast, setEditingBroadcast] = useState<Broadcast | null>(null);
 
+  // Stats panel state — per broadcast: { recipients, loading } cached
+  // until the user collapses the panel. ID of the currently expanded
+  // broadcast lives in `statsOpenId` (only one open at a time).
+  type Recipient = {
+    contact_id: string;
+    contact_alias: string;
+    status: string;
+    sent_at: string | null;
+    error: string | null;
+  };
+  const [statsOpenId, setStatsOpenId] = useState<string | null>(null);
+  const [recipientsCache, setRecipientsCache] = useState<Record<string, Recipient[]>>({});
+  const [recipientsLoading, setRecipientsLoading] = useState<string | null>(null);
+
+  const toggleStats = async (bcId: string) => {
+    if (statsOpenId === bcId) {
+      setStatsOpenId(null);
+      return;
+    }
+    setStatsOpenId(bcId);
+    if (!recipientsCache[bcId]) {
+      setRecipientsLoading(bcId);
+      try {
+        const data: Recipient[] = await api(`/api/broadcasts/${bcId}/recipients`);
+        setRecipientsCache((prev) => ({ ...prev, [bcId]: data }));
+      } catch (e) {
+        console.error("Failed to load broadcast recipients", e);
+      } finally {
+        setRecipientsLoading((cur) => (cur === bcId ? null : cur));
+      }
+    }
+  };
+
   useEffect(() => {
     connectWS();
     getBroadcasts().then(setBroadcasts).catch(console.error);
@@ -783,6 +816,23 @@ function BroadcastsContent() {
                   {(bc.status === "running" || bc.status === "paused") && (
                     <Button variant="danger" onClick={() => handleCancel(bc.id)}>Отменить</Button>
                   )}
+                  {/* "Статистика" — toggles the per-recipient breakdown
+                      panel below the card. Visible for any broadcast that
+                      has at least one recipient row (i.e. has been started
+                      at some point). Drafts have nothing to show. */}
+                  {bc.total_recipients > 0 && (
+                    <Button
+                      variant={statsOpenId === bc.id ? "secondary" : "ghost"}
+                      onClick={() => toggleStats(bc.id)}
+                    >
+                      <svg className="w-3.5 h-3.5 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="20" x2="18" y2="10"/>
+                        <line x1="12" y1="20" x2="12" y2="4"/>
+                        <line x1="6" y1="20" x2="6" y2="14"/>
+                      </svg>
+                      Статистика
+                    </Button>
+                  )}
                   {bc.status !== "running" && (
                     <Button variant="ghost" onClick={() => handleDelete(bc.id)}>
                       <svg className="w-3.5 h-3.5 text-red-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
@@ -864,6 +914,68 @@ function BroadcastsContent() {
               <div className="text-[10px] text-slate-600 mt-2">
                 {new Date(bc.created_at).toLocaleString()} | Задержка: {bc.delay_seconds}с
               </div>
+              {/* Stats panel — inline expand. Loaded lazily on first
+                  open via /api/broadcasts/{id}/recipients, cached for
+                  the lifetime of the page so re-opening is instant. */}
+              {statsOpenId === bc.id && (
+                <div className="mt-3 pt-3 border-t border-surface-border">
+                  {recipientsLoading === bc.id ? (
+                    <div className="text-xs text-slate-500 py-2">Загрузка получателей…</div>
+                  ) : (recipientsCache[bc.id]?.length ?? 0) === 0 ? (
+                    <div className="text-xs text-slate-500 py-2">Получателей пока нет</div>
+                  ) : (
+                    <>
+                      <div className="text-[11px] text-slate-500 mb-2">
+                        Получателей: {recipientsCache[bc.id]!.length} (
+                        <span className="text-emerald-400">отправлено {recipientsCache[bc.id]!.filter((r) => r.status === "sent").length}</span>
+                        {recipientsCache[bc.id]!.filter((r) => r.status === "failed").length > 0 && (
+                          <>
+                            {" · "}
+                            <span className="text-red-400">ошибок {recipientsCache[bc.id]!.filter((r) => r.status === "failed").length}</span>
+                          </>
+                        )}
+                        {recipientsCache[bc.id]!.filter((r) => r.status === "pending").length > 0 && (
+                          <>
+                            {" · "}
+                            <span className="text-amber-400">ожидают {recipientsCache[bc.id]!.filter((r) => r.status === "pending").length}</span>
+                          </>
+                        )}
+                        )
+                      </div>
+                      <div className="max-h-72 overflow-y-auto space-y-1">
+                        {recipientsCache[bc.id]!.map((r) => (
+                          <div
+                            key={r.contact_id}
+                            className="flex items-center justify-between gap-3 text-[11px] py-1 px-2 rounded hover:bg-surface-hover"
+                          >
+                            <span className="font-mono text-slate-300 truncate" title={r.contact_alias}>
+                              {r.contact_alias}
+                            </span>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              {r.status === "sent" && (
+                                <>
+                                  <span className="text-emerald-400">✓ отправлено</span>
+                                  {r.sent_at && (
+                                    <span className="text-slate-500">
+                                      {new Date(r.sent_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                              {r.status === "failed" && (
+                                <span className="text-red-400 max-w-[260px] truncate" title={r.error || "Ошибка"}>
+                                  ✗ {r.error || "ошибка"}
+                                </span>
+                              )}
+                              {r.status === "pending" && <span className="text-amber-400">⏳ ожидает</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}

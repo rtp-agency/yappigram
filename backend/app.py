@@ -151,6 +151,7 @@ from schemas import (
     BotInviteOut,
     BroadcastCreate,
     BroadcastOut,
+    BroadcastRecipientOut,
     ContactOut,
     ContactReveal,
     ContactUpdate,
@@ -4620,6 +4621,57 @@ async def delete_broadcast(broadcast_id: UUID, user: CurrentUser, db: DB):
     await db.delete(bc)
     await db.commit()
     return {"status": "deleted"}
+
+
+@app.get("/api/broadcasts/{broadcast_id}/recipients", response_model=list[BroadcastRecipientOut])
+async def list_broadcast_recipients(broadcast_id: UUID, user: CurrentUser, db: DB):
+    """Per-recipient breakdown for the "Статистика" panel on the
+    broadcasts page. Operator wants to see who got the message and who
+    failed, with the error message right next to the failed row.
+
+    Org-scoping: the broadcast itself is filtered by org, and recipients
+    are children of that broadcast. We don't need a second org check on
+    each contact — the FK chain guarantees they belong to the same org.
+
+    Sort order matches the operator's debugging flow: failed rows first
+    (the ones they need to act on), then sent (in reverse-chronological
+    so the latest landed message floats up), then still-pending. Aliases
+    only — never decrypted real names. The stats panel is debug data,
+    not a contact reveal surface.
+    """
+    bc_result = await db.execute(select(Broadcast).where(
+        Broadcast.id == broadcast_id,
+        Broadcast.org_id == _org_id(user),
+    ))
+    bc = bc_result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    from sqlalchemy import case
+    rows = await db.execute(
+        select(BroadcastRecipient, Contact.alias)
+        .join(Contact, Contact.id == BroadcastRecipient.contact_id)
+        .where(BroadcastRecipient.broadcast_id == broadcast_id)
+        .order_by(
+            # failed → sent → pending (operator's debug order)
+            case(
+                (BroadcastRecipient.status == "failed", 1),
+                (BroadcastRecipient.status == "sent", 2),
+                else_=3,
+            ),
+            BroadcastRecipient.sent_at.desc().nullslast(),
+        )
+    )
+    return [
+        BroadcastRecipientOut(
+            contact_id=r.contact_id,
+            contact_alias=alias,
+            status=r.status,
+            sent_at=r.sent_at,
+            error=r.error,
+        )
+        for r, alias in rows.all()
+    ]
 
 
 async def _run_broadcast(broadcast_id: UUID):
