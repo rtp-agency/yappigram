@@ -2078,13 +2078,22 @@ async def get_pinned(user: Annotated[Staff, Depends(get_current_user)], db: DB):
 
 
 async def _set_contact_pin(contact_id: UUID, user: Staff, db, pinned: bool) -> None:
-    """Shared body for pin/unpin. Pushes the real Telegram pin state via
-    Telethon, mirrors it to Contact.is_pinned, and keeps the legacy
-    PinnedChat table in sync so the existing UI (pinned Set) continues to
-    work. When TG push fails (account disconnected, pin cap exceeded),
-    raises HTTP 400/502 — the frontend can then surface the actual reason.
+    """Shared body for pin/unpin. Mirrors `pinned` to Contact.is_pinned
+    and keeps the legacy PinnedChat table in sync. CRM-LOCAL ONLY — does
+    NOT touch Telegram.
+
+    History: this used to push the pin state to Telegram via Telethon
+    (`telegram.set_chat_pin`, which calls ToggleDialogPinRequest). That
+    forced CRM users to live within the TG hard cap (5 pinned dialogs
+    for non-Premium accounts) and surfaced `PinnedDialogsTooMuchError`
+    as HTTP 502 in the CRM UI — operators got a Cloudflare 502 page on
+    a routine "pin chat" click once they had ≥5 pinned. Operator's call
+    on 27-Apr: pin is a CRM-local concept, decoupled from TG. CRM users
+    can pin as many chats as they want; TG side stays untouched.
+
+    `telegram.set_chat_pin` is now unreferenced — left in place rather
+    than deleted, in case we want to re-enable per-account TG sync later.
     """
-    from telegram import set_chat_pin
     from sqlalchemy import delete as sa_delete
 
     org = _org_id(user)
@@ -2095,16 +2104,6 @@ async def _set_contact_pin(contact_id: UUID, user: Staff, db, pinned: bool) -> N
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
-
-    try:
-        await set_chat_pin(contact.tg_account_id, contact.real_tg_id, pinned)
-    except ValueError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    except Exception as e:
-        # Most common failure: PinnedDialogsTooMuchError when user already
-        # has 5 pinned chats (TG hard cap for non-Premium). Surface the
-        # verbatim Telegram message so the UI can show it.
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Telegram отклонил изменение пина: {e}")
 
     contact.is_pinned = pinned
 
@@ -2128,19 +2127,15 @@ async def _set_contact_pin(contact_id: UUID, user: Staff, db, pinned: bool) -> N
 
 @app.post("/api/pinned/{contact_id}", status_code=204)
 async def pin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
-    """Pin chat both in Telegram (real pin) and in CRM.
-
-    Previously CRM was a separate pin layer — users could not unpin chats
-    that were pinned natively in Telegram because CRM only removed its own
-    PinnedChat row. Now pin/unpin drive the real Telegram state via
-    Telethon's ToggleDialogPinRequest.
-    """
+    """Pin chat in CRM only. Does NOT touch Telegram (decoupled 27-Apr —
+    see `_set_contact_pin` docstring). CRM has no pin cap; pinning is
+    independent of TG's 5-dialog hard limit."""
     await _set_contact_pin(contact_id, user, db, pinned=True)
 
 
 @app.delete("/api/pinned/{contact_id}", status_code=204)
 async def unpin_chat(contact_id: UUID, user: Annotated[Staff, Depends(get_current_user)], db: DB):
-    """Unpin chat in Telegram + remove the CRM pin row."""
+    """Unpin chat in CRM only (no TG side-effect)."""
     await _set_contact_pin(contact_id, user, db, pinned=False)
 
 

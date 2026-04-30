@@ -1790,8 +1790,11 @@ function ChatsContent() {
     try {
       await api(`/api/pinned/${contactId}`, { method: nextPinned ? "POST" : "DELETE" });
     } catch (e: any) {
-      // Revert on failure — backend returns 502 "Telegram отклонил ..."
-      // when the pin cap (5 non-Premium, 10 Premium) is exceeded.
+      // Revert on failure. Pin is now CRM-local only (decoupled from
+      // Telegram on 27-Apr — see backend `_set_contact_pin` docstring).
+      // No more 502 from a TG pin cap; the only remaining failure modes
+      // are network errors, auth/session timeout, or 404 on a stale
+      // contact_id.
       setContacts((prev) => prev.map((c) => c.id === contactId ? { ...c, is_pinned: currentlyPinned } : c));
       setPinned((prev) => {
         const next = new Set(prev);
@@ -1801,7 +1804,7 @@ function ChatsContent() {
       if (selected?.id === contactId) {
         setSelected((s) => s ? { ...s, is_pinned: currentlyPinned } : s);
       }
-      alert(e?.message || "Не удалось изменить закрепление в Telegram");
+      alert(e?.message || "Не удалось изменить закрепление");
     }
   };
 
