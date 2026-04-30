@@ -296,6 +296,14 @@ class BroadcastOut(BaseModel):
     media_path: str | None = None
     media_type: str | None = None
     tg_account_id: UUID
+    # Human-readable account label — phone or display_name. Populated by
+    # the list/create/patch handlers via a TgAccount join so the UI can
+    # show "from +88809674157" under each broadcast title without an
+    # extra round-trip. None on rare edge cases (account deleted but
+    # broadcast row survived; FK is non-nullable so this is mostly a
+    # safety guard for older legacy data).
+    tg_account_phone: str | None = None
+    tg_account_display_name: str | None = None
     tag_filter: list[str] = []
     tag_exclude: list[str] = []
     include_archived: bool = False
@@ -306,6 +314,10 @@ class BroadcastOut(BaseModel):
     sent_count: int
     failed_count: int
     created_by: UUID | None = None
+    # Staff.name resolved via join. Same rationale as the account fields
+    # above. NULL when broadcast was created by a now-deleted staff or
+    # by a system path that didn't set created_by (early drafts).
+    created_by_name: str | None = None
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None

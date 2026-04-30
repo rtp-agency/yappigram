@@ -730,6 +730,13 @@ export interface Broadcast {
   media_path: string | null;
   media_type: string | null;
   tg_account_id: string;
+  // Resolved labels for the UI — populated server-side via TgAccount/Staff
+  // joins so the broadcasts list can show "from +88809674157 · автор Иван"
+  // without an extra round-trip per row. Optional for backward-compat with
+  // any cached payload from before the API extension.
+  tg_account_phone?: string | null;
+  tg_account_display_name?: string | null;
+  created_by_name?: string | null;
   tag_filter: string[];
   tag_exclude: string[];
   // When true the recipient builder lifts the is_archived=false cut, so a

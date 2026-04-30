@@ -4216,10 +4216,41 @@ async def translate_text(req: TranslateRequest, user: CurrentUser):
 # Broadcasts
 # ============================================================
 
+async def _broadcast_to_out(bc: Broadcast, db) -> BroadcastOut:
+    """Convert a Broadcast row to BroadcastOut, resolving the human-
+    readable account label and creator name in one shot. Used by every
+    endpoint that returns a single broadcast or a list — keeps the UI
+    free of UUID-only displays.
+
+    Looks up TgAccount.phone/display_name and Staff.name via two simple
+    PK fetches (cached via session identity-map on a list call where the
+    same staff/account is referenced repeatedly). Returns None for the
+    label fields when the FK target is missing — UI falls back to "—".
+    """
+    tg_phone = None
+    tg_display = None
+    if bc.tg_account_id:
+        acc = await db.get(TgAccount, bc.tg_account_id)
+        if acc is not None:
+            tg_phone = acc.phone
+            tg_display = acc.display_name
+    creator_name = None
+    if bc.created_by:
+        st = await db.get(Staff, bc.created_by)
+        if st is not None:
+            creator_name = st.name
+    out = BroadcastOut.model_validate(bc)
+    out.tg_account_phone = tg_phone
+    out.tg_account_display_name = tg_display
+    out.created_by_name = creator_name
+    return out
+
+
 @app.get("/api/broadcasts", response_model=list[BroadcastOut])
 async def list_broadcasts(user: CurrentUser, db: DB):
     result = await db.execute(select(Broadcast).where(Broadcast.org_id == _org_id(user)).order_by(Broadcast.created_at.desc()))
-    return result.scalars().all()
+    rows = result.scalars().all()
+    return [await _broadcast_to_out(bc, db) for bc in rows]
 
 
 @app.post("/api/broadcasts", response_model=BroadcastOut)
@@ -4246,7 +4277,7 @@ async def create_broadcast(req: BroadcastCreate, user: CurrentUser, db: DB):
     db.add(bc)
     await db.commit()
     await db.refresh(bc)
-    return bc
+    return await _broadcast_to_out(bc, db)
 
 
 @app.post("/api/broadcasts/{broadcast_id}/upload-media")
@@ -4572,7 +4603,7 @@ async def update_broadcast(broadcast_id: UUID, req: BroadcastCreate, user: Curre
     bc.contact_ids = req.contact_ids or []
     await db.commit()
     await db.refresh(bc)
-    return bc
+    return await _broadcast_to_out(bc, db)
 
 
 @app.delete("/api/broadcasts/{broadcast_id}")
