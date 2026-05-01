@@ -831,28 +831,38 @@ function BroadcastsContent() {
                   {bc.media_type === "photo" ? "📷 Фото" : bc.media_type === "video" ? "🎬 Видео" : bc.media_type === "video_note" ? "🔵 Кружок" : bc.media_type === "voice" ? "🎤 Голосовое" : "📄 Файл"}
                 </span>
               )}
-              {/* Account + author meta — resolved server-side via TgAccount /
-                  Staff joins. Either label may be missing on legacy rows
-                  (older drafts before the API extension); UI degrades to "—"
-                  rather than hiding the row entirely so the operator always
-                  knows who/where the broadcast belongs to. */}
-              {(bc.tg_account_phone || bc.tg_account_display_name || bc.created_by_name) && (
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 mb-1">
-                  <span className="inline-flex items-center gap-1">
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                    </svg>
-                    {bc.tg_account_display_name || bc.tg_account_phone || "—"}
-                  </span>
-                  <span className="inline-flex items-center gap-1">
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                      <circle cx="12" cy="7" r="4"/>
-                    </svg>
-                    {bc.created_by_name || "—"}
-                  </span>
-                </div>
-              )}
+              {/* Account + author meta — each chip rendered ONLY when
+                  its value resolves. Test/legacy accounts often lack
+                  both phone and display_name (TgAccount.phone can be
+                  empty for accounts added pre-phone-required), and the
+                  previous "always render the icon, fall back to —"
+                  pattern produced an orphan phone glyph that read as
+                  broken UI. Now: empty value → no chip at all. */}
+              {(() => {
+                const accountLabel = bc.tg_account_display_name || bc.tg_account_phone;
+                if (!accountLabel && !bc.created_by_name) return null;
+                return (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 mb-1">
+                    {accountLabel && (
+                      <span className="inline-flex items-center gap-1">
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                        </svg>
+                        {accountLabel}
+                      </span>
+                    )}
+                    {bc.created_by_name && (
+                      <span className="inline-flex items-center gap-1">
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                          <circle cx="12" cy="7" r="4"/>
+                        </svg>
+                        {bc.created_by_name}
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
               {bc.content && <p className="text-sm text-slate-400 mb-2 line-clamp-2">{bc.content}</p>}
               {bc.total_recipients > 0 && (
                 <div className="mt-2">
