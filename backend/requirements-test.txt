@@ -1,0 +1,14 @@
+# Test-only dependencies. Installed locally / in CI, NEVER in the prod
+# image. The prod Dockerfile only installs `requirements.txt`.
+#
+# Versions pinned to match the runtime stack (asyncpg, sqlalchemy, httpx)
+# already pulled by `requirements.txt` — these add the test machinery
+# on top.
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pytest-cov==5.0.0
+# httpx is already a runtime dep (0.28.1); listed here too so test-only
+# installs work without the full runtime requirements.
+httpx==0.28.1
+# Time freezing for scheduled-message tests (Этап 4).
+freezegun==1.5.1

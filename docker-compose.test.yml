@@ -1,0 +1,43 @@
+# Isolated test environment — test-only Postgres + Redis on non-default
+# ports so they NEVER conflict with the dev or prod yappigram stack.
+# Used by `scripts/run-tests.sh` and CI.
+#
+# SAFETY:
+#   - Different network from prod (uses default compose network for this file)
+#   - Different ports (55433/56380) so a misfire on `docker compose up` against
+#     this file can't accidentally touch prod connections
+#   - tmpfs for postgres data — wiped on every run, no stale state
+#
+# DO NOT add this file to prod deployment scripts.
+services:
+  test-db:
+    image: postgres:16-alpine
+    container_name: yappigram-test-db
+    environment:
+      POSTGRES_USER: tgcrm_test
+      POSTGRES_PASSWORD: tgcrm_test
+      POSTGRES_DB: tgcrm_test
+    ports:
+      # Host port 55433 — way outside the default 5432 range so nothing
+      # in dev or prod can accidentally pick this up as the DB.
+      - "127.0.0.1:55433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tgcrm_test -d tgcrm_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  test-redis:
+    image: redis:7-alpine
+    container_name: yappigram-test-redis
+    ports:
+      - "127.0.0.1:56380:6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

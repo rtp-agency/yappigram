@@ -1,0 +1,34 @@
+# Test runner image — uses the same base and runtime deps as the prod
+# image, plus the test extras. Built once locally / in CI; never
+# deployed to crm.metra-ai.org.
+#
+# This file is INTENTIONALLY separate from prod Dockerfile so that:
+#   - prod image stays minimal (no pytest, no test fixtures)
+#   - test deps (pytest, freezegun, etc.) can drift from prod without
+#     bloating the runtime
+FROM python:3.11-slim
+
+# Same system deps as prod (for asyncpg + cryptography wheels).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install runtime deps first (for layer caching).
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Then test extras.
+COPY requirements-test.txt .
+RUN pip install --no-cache-dir -r requirements-test.txt
+
+# The test code itself is mounted as a volume at runtime, so we don't
+# need to COPY it into the image. This lets developers edit tests +
+# rerun without rebuilding.
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+CMD ["pytest"]
